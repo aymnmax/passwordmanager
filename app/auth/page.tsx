@@ -1,4 +1,5 @@
 'use client';
+
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
@@ -6,60 +7,79 @@ import { deriveKey } from '@/lib/crypto';
 import { useAuth } from '@/context/AuthContext';
 import { toast } from 'sonner';
 import { UAParser } from 'ua-parser-js';
-import { Eye, EyeOff, Lock, User, HelpCircle, ArrowRight } from 'lucide-react';
+import { 
+  Loader2, 
+  Mail, 
+  Lock, 
+  ShieldCheck, 
+  ArrowRight, 
+  HelpCircle, 
+  CheckCircle2, 
+  LayoutGrid 
+} from 'lucide-react';
 
-const ANIMALS = [
-  { id: 'elephant', icon: '🐘' },
-  { id: 'cat', icon: '🐱' },
-  { id: 'dog', icon: '🐶' },
-  { id: 'lion', icon: '🦁' },
-  { id: 'panda', icon: '🐼' },
-  { id: 'fox', icon: '🦊' },
+// Professional icons for the security image step
+const SECURITY_IMAGES = [
+  { id: 'elephant', label: 'Elephant', icon: '🐘' },
+  { id: 'cat', label: 'Cat', icon: '🐱' },
+  { id: 'dog', label: 'Dog', icon: '🐶' },
+  { id: 'lion', label: 'Lion', icon: '🦁' },
+  { id: 'panda', label: 'Panda', icon: '🐼' },
+  { id: 'fox', label: 'Fox', icon: '🦊' },
 ];
 
 export default function AuthPage() {
   const [isLogin, setIsLogin] = useState(true);
   const [loading, setLoading] = useState(false);
+  const [loginStep, setLoginStep] = useState(1); // 1 = Credentials, 2 = Security Image
+  
   const [form, setForm] = useState({ 
     email: '', 
     password: '', 
     securityQ: '', 
     securityA: '', 
-    selectedAnimal: '' 
+    selectedImage: '' 
   });
-  
-  // Login State
-  const [loginStep, setLoginStep] = useState(1); // 1 = Creds, 2 = Animal
 
   const { setMasterKey } = useAuth();
   const router = useRouter();
 
+  // --- REGISTRATION LOGIC ---
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!form.selectedAnimal) return toast.error('Pick an animal!');
+    if (!form.selectedImage) return toast.error('Please select a security image.');
     setLoading(true);
 
     try {
-      // 1. Sign Up
-      const { data, error } = await supabase.auth.signUp({ email: form.email, password: form.password });
-      if (error) throw error;
-      if (!data.user) throw new Error('Registration failed');
+      // 1. Create Auth User
+      const { data, error } = await supabase.auth.signUp({ 
+        email: form.email, 
+        password: form.password 
+      });
 
-      // 2. Create Profile (Security Q + Animal)
-      // Hash the answer for basic privacy
-      const answerHash = btoa(form.securityA.toLowerCase().trim()); 
+      if (error) throw error;
+      if (!data.user) throw new Error('Registration failed. Please try again.');
+
+      // 2. Create Security Profile
+      // Note: If you get an RLS error here, ensure "Confirm Email" is DISABLED in Supabase
+      const answerHash = btoa(form.securityA.toLowerCase().trim()); // Basic encoding
       
       const { error: profileError } = await supabase.from('user_profiles').insert({
         id: data.user.id,
         security_question: form.securityQ,
         security_answer_hash: answerHash,
-        selected_animal: form.selectedAnimal
+        selected_animal: form.selectedImage
       });
 
-      if (profileError) throw profileError;
+      if (profileError) {
+        // Fallback: If insert fails, try to clean up auth user so they can try again
+        console.error("Profile Error:", profileError);
+        throw new Error("Failed to create profile. Please contact support.");
+      }
 
-      toast.success('Account created! Please log in.');
+      toast.success('Account created successfully. Please sign in.');
       setIsLogin(true);
+      setForm({ email: '', password: '', securityQ: '', securityA: '', selectedImage: '' });
     } catch (err: any) {
       toast.error(err.message);
     } finally {
@@ -67,108 +87,170 @@ export default function AuthPage() {
     }
   };
 
+  // --- LOGIN STEP 1: VALIDATE CREDENTIALS ---
   const handleLoginInit = async (e: React.FormEvent) => {
     e.preventDefault();
-    // Move to step 2 (Animal Check)
-    setLoginStep(2);
-  };
-
-  const handleLoginFinal = async (animalId: string) => {
     setLoading(true);
+
     try {
-      // 1. Supabase Auth
-      const { data, error } = await supabase.auth.signInWithPassword({ 
+      // Check if credentials are valid before moving to image step
+      const { error } = await supabase.auth.signInWithPassword({ 
         email: form.email, 
         password: form.password 
       });
-      if (error) throw new Error('Wrong credentials');
 
-      // 2. Check Animal (Security Step)
+      if (error) throw new Error('Invalid email or password.');
+      
+      // If valid, move to Security Image Step
+      setLoginStep(2);
+    } catch (err: any) {
+      toast.error(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // --- LOGIN STEP 2: VALIDATE IMAGE & DERIVE KEY ---
+  const handleLoginFinal = async (imageId: string) => {
+    setLoading(true);
+    try {
+      // 1. Get current session (we signed in during step 1)
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) throw new Error('Session expired. Please login again.');
+
+      // 2. Verify Security Image
       const { data: profile } = await supabase
         .from('user_profiles')
         .select('selected_animal')
-        .eq('id', data.user.id)
+        .eq('id', user.id)
         .single();
 
-      if (!profile || profile.selected_animal !== animalId) {
+      if (!profile || profile.selected_animal !== imageId) {
+        // Security mismatch - Force logout
         await supabase.auth.signOut();
-        throw new Error('Wrong animal! Security check failed.');
+        setLoginStep(1);
+        throw new Error('Security verification failed.');
       }
 
-      // 3. Success - Derive Key
-      const key = await deriveKey(form.password, data.user.id);
+      // 3. Derive Encryption Key (Zero Knowledge)
+      const key = await deriveKey(form.password, user.id);
       setMasterKey(key);
 
-      // 4. Log Session (Optional)
+      // 4. Log Session
       const parser = new UAParser();
       await supabase.from('login_sessions').insert({
-        user_id: data.user.id,
-        device_name: `${parser.getBrowser().name} on ${parser.getOS().name}`
+        user_id: user.id,
+        device_name: `${parser.getBrowser().name} on ${parser.getOS().name}`,
+        ip_address: 'Logged' 
       });
 
+      toast.success('Vault unlocked.');
       router.push('/vault');
-      toast.success('Welcome back!');
+
     } catch (err: any) {
       toast.error(err.message);
-      if (err.message.includes('animal')) setLoginStep(1); // Reset on security fail
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="min-h-screen bg-yellow-50 flex items-center justify-center p-4 font-sans">
-      <div className="w-full max-w-md bg-white border-4 border-black shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] rounded-xl overflow-hidden">
+    <div className="min-h-screen flex items-center justify-center bg-slate-50 p-4 font-sans text-slate-900">
+      <div className="bg-white w-full max-w-5xl rounded-2xl shadow-2xl overflow-hidden flex flex-col md:flex-row border border-slate-100">
         
-        {/* Header */}
-        <div className="bg-blue-400 p-6 border-b-4 border-black text-center">
-          <h1 className="text-3xl font-black text-white uppercase tracking-wider drop-shadow-md">
-            {isLogin ? 'Vault Login' : 'Join the Squad'}
-          </h1>
+        {/* Left Side: Visual/Branding */}
+        <div className="md:w-1/2 bg-slate-900 p-12 text-white flex flex-col justify-between relative overflow-hidden">
+          <div className="relative z-10">
+            <div className="flex items-center gap-2 mb-8 text-blue-400">
+              <ShieldCheck className="w-8 h-8" />
+              <span className="font-semibold text-lg tracking-wide">FORTRESS</span>
+            </div>
+            <h1 className="text-4xl font-bold mb-4 leading-tight">
+              {isLogin ? 'Welcome Back.' : 'Secure Your Digital Life.'}
+            </h1>
+            <p className="text-slate-400 text-lg">
+              {isLogin 
+                ? 'Access your encrypted vault securely with multi-factor verification.' 
+                : 'Zero-knowledge encryption for your passwords and API keys.'}
+            </p>
+          </div>
+          <div className="absolute top-0 right-0 -mr-20 -mt-20 w-80 h-80 bg-blue-600 rounded-full blur-3xl opacity-20" />
+          <div className="absolute bottom-0 left-0 -ml-20 -mb-20 w-80 h-80 bg-indigo-600 rounded-full blur-3xl opacity-20" />
         </div>
 
-        <div className="p-8">
+        {/* Right Side: Form */}
+        <div className="md:w-1/2 p-12 flex flex-col justify-center">
+          
           {/* LOGIN FLOW */}
           {isLogin && (
             <>
               {loginStep === 1 ? (
-                <form onSubmit={handleLoginInit} className="space-y-4">
+                <form onSubmit={handleLoginInit} className="space-y-6 animate-in fade-in slide-in-from-right-8 duration-500">
                   <div>
-                    <label className="font-bold text-sm uppercase">Email</label>
-                    <input 
-                      type="email" required 
-                      className="w-full border-4 border-black rounded-lg p-3 font-bold focus:shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] focus:translate-x-[-2px] focus:translate-y-[-2px] transition-all outline-none"
-                      value={form.email} onChange={e => setForm({...form, email: e.target.value})}
-                    />
+                    <h2 className="text-2xl font-bold text-slate-900 mb-1">Sign In</h2>
+                    <p className="text-slate-500 text-sm">Enter your master credentials to proceed.</p>
                   </div>
-                  <div>
-                    <label className="font-bold text-sm uppercase">Password</label>
-                    <input 
-                      type="password" required 
-                      className="w-full border-4 border-black rounded-lg p-3 font-bold outline-none"
-                      value={form.password} onChange={e => setForm({...form, password: e.target.value})}
-                    />
+
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1">Email Address</label>
+                      <div className="relative">
+                        <Mail className="absolute left-3 top-3 text-slate-400 w-5 h-5" />
+                        <input 
+                          type="email" required 
+                          className="w-full pl-10 pr-4 py-2.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
+                          value={form.email} 
+                          onChange={e => setForm({...form, email: e.target.value})}
+                        />
+                      </div>
+                    </div>
+                    
+                    <div>
+                      <div className="flex justify-between items-center mb-1">
+                        <label className="block text-sm font-medium text-slate-700">Master Password</label>
+                        <button type="button" onClick={() => router.push('/auth/forgot')} className="text-xs text-blue-600 hover:underline">Forgot?</button>
+                      </div>
+                      <div className="relative">
+                        <Lock className="absolute left-3 top-3 text-slate-400 w-5 h-5" />
+                        <input 
+                          type="password" required 
+                          className="w-full pl-10 pr-4 py-2.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
+                          value={form.password} 
+                          onChange={e => setForm({...form, password: e.target.value})}
+                        />
+                      </div>
+                    </div>
                   </div>
-                  <button className="w-full bg-yellow-400 hover:bg-yellow-300 text-black font-black py-4 border-4 border-black rounded-xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-1 hover:shadow-none transition-all flex items-center justify-center gap-2">
-                    NEXT STEP <ArrowRight strokeWidth={3} />
+
+                  <button 
+                    disabled={loading}
+                    className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 rounded-lg transition-all flex items-center justify-center gap-2 shadow-sm disabled:opacity-70"
+                  >
+                    {loading ? <Loader2 className="animate-spin" /> : <>Verify Credentials <ArrowRight size={18} /></>}
                   </button>
-                  <p className="text-center font-bold underline cursor-pointer" onClick={() => router.push('/auth/forgot')}>Forgot Password?</p>
                 </form>
               ) : (
-                <div className="text-center animate-in zoom-in">
-                  <h3 className="text-xl font-black mb-4">Pick your Security Animal 🐘</h3>
-                  <div className="grid grid-cols-3 gap-3">
-                    {ANIMALS.map(a => (
-                      <button 
-                        key={a.id}
-                        onClick={() => handleLoginFinal(a.id)}
-                        className="text-4xl p-4 border-4 border-black rounded-lg hover:bg-green-200 hover:scale-105 transition-transform"
+                <div className="animate-in zoom-in duration-300">
+                  <h2 className="text-2xl font-bold text-slate-900 mb-2 text-center">Security Verification</h2>
+                  <p className="text-slate-500 text-sm text-center mb-6">Select your personal security image to unlock the vault.</p>
+                  
+                  <div className="grid grid-cols-3 gap-4 mb-6">
+                    {SECURITY_IMAGES.map((img) => (
+                      <button
+                        key={img.id}
+                        onClick={() => handleLoginFinal(img.id)}
+                        disabled={loading}
+                        className="flex flex-col items-center p-4 rounded-xl border border-slate-200 hover:border-blue-500 hover:bg-blue-50 transition-all group"
                       >
-                        {a.icon}
+                        <span className="text-4xl mb-2 group-hover:scale-110 transition-transform">{img.icon}</span>
+                        <span className="text-xs font-medium text-slate-600 group-hover:text-blue-600">{img.label}</span>
                       </button>
                     ))}
                   </div>
-                  <button onClick={() => setLoginStep(1)} className="mt-6 font-bold underline text-sm">Go Back</button>
+                  
+                  <button onClick={() => setLoginStep(1)} className="w-full text-sm text-slate-500 hover:text-slate-800">
+                    Cancel and go back
+                  </button>
                 </div>
               )}
             </>
@@ -176,53 +258,88 @@ export default function AuthPage() {
 
           {/* REGISTER FLOW */}
           {!isLogin && (
-            <form onSubmit={handleRegister} className="space-y-4">
-               <div>
-                  <label className="font-bold text-xs uppercase">Email</label>
-                  <input type="email" required className="w-full border-2 border-black rounded p-2 font-bold" value={form.email} onChange={e => setForm({...form, email: e.target.value})} />
-               </div>
-               <div>
-                  <label className="font-bold text-xs uppercase">Master Password</label>
-                  <input type="password" required className="w-full border-2 border-black rounded p-2 font-bold" value={form.password} onChange={e => setForm({...form, password: e.target.value})} />
-               </div>
-               
-               <div className="border-t-2 border-black border-dashed pt-2">
-                 <label className="font-bold text-xs uppercase">Security Question</label>
-                 <select className="w-full border-2 border-black rounded p-2 font-bold mb-2" value={form.securityQ} onChange={e => setForm({...form, securityQ: e.target.value})}>
-                   <option value="">Select Question...</option>
-                   <option value="pet">First Pet's Name?</option>
-                   <option value="school">First School?</option>
-                   <option value="city">City you were born?</option>
-                 </select>
-                 <input type="text" placeholder="Answer..." className="w-full border-2 border-black rounded p-2 font-bold" value={form.securityA} onChange={e => setForm({...form, securityA: e.target.value})} />
-               </div>
+            <form onSubmit={handleRegister} className="space-y-4 animate-in fade-in slide-in-from-left-8 duration-500">
+              <div>
+                <h2 className="text-2xl font-bold text-slate-900 mb-1">Create Account</h2>
+                <p className="text-slate-500 text-sm">Configure your vault security settings.</p>
+              </div>
 
-               <div>
-                 <label className="font-bold text-xs uppercase mb-2 block">Select Security Animal</label>
-                 <div className="flex justify-between">
-                    {ANIMALS.map(a => (
-                      <button 
-                        key={a.id} type="button"
-                        onClick={() => setForm({...form, selectedAnimal: a.id})}
-                        className={`text-2xl p-1 border-2 border-black rounded ${form.selectedAnimal === a.id ? 'bg-green-300 shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]' : 'bg-white'}`}
-                      >
-                        {a.icon}
-                      </button>
-                    ))}
-                 </div>
-               </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <input 
+                  type="email" placeholder="Email Address" required
+                  className="w-full px-4 py-2.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none"
+                  value={form.email} onChange={e => setForm({...form, email: e.target.value})}
+                />
+                <input 
+                  type="password" placeholder="Master Password" required
+                  className="w-full px-4 py-2.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none"
+                  value={form.password} onChange={e => setForm({...form, password: e.target.value})}
+                />
+              </div>
 
-               <button className="w-full bg-pink-500 text-white font-black py-3 border-4 border-black rounded-xl shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:translate-y-1 hover:shadow-none transition-all mt-4">
-                 CREATE VAULT
-               </button>
+              <div className="p-4 bg-slate-50 rounded-lg border border-slate-200 space-y-3">
+                <div className="flex items-center gap-2 text-sm font-medium text-slate-700">
+                  <HelpCircle size={16} className="text-blue-500" /> Security Question
+                </div>
+                <select 
+                  className="w-full px-3 py-2 rounded border border-slate-300 bg-white text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                  value={form.securityQ} onChange={e => setForm({...form, securityQ: e.target.value})}
+                  required
+                >
+                  <option value="">Select a question...</option>
+                  <option value="pet">What was the name of your first pet?</option>
+                  <option value="school">What elementary school did you attend?</option>
+                  <option value="city">In what city were you born?</option>
+                </select>
+                <input 
+                  type="text" placeholder="Your Answer" required
+                  className="w-full px-3 py-2 rounded border border-slate-300 bg-white text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                  value={form.securityA} onChange={e => setForm({...form, securityA: e.target.value})}
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">Select Security Image</label>
+                <div className="grid grid-cols-6 gap-2">
+                  {SECURITY_IMAGES.map((img) => (
+                    <button
+                      key={img.id} type="button"
+                      onClick={() => setForm({...form, selectedImage: img.id})}
+                      className={`aspect-square flex items-center justify-center text-xl rounded-lg border transition-all ${
+                        form.selectedImage === img.id 
+                          ? 'bg-blue-600 border-blue-600 text-white shadow-md scale-105' 
+                          : 'bg-white border-slate-200 hover:border-blue-400'
+                      }`}
+                      title={img.label}
+                    >
+                      {img.icon}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <button 
+                disabled={loading}
+                className="w-full bg-slate-900 hover:bg-slate-800 text-white font-medium py-3 rounded-lg transition-all shadow-sm mt-2 disabled:opacity-70"
+              >
+                {loading ? <Loader2 className="animate-spin mx-auto" /> : 'Create Secure Vault'}
+              </button>
             </form>
           )}
-        </div>
-        
-        <div className="bg-gray-100 p-4 text-center border-t-4 border-black">
-          <button onClick={() => { setIsLogin(!isLogin); setLoginStep(1); }} className="font-bold text-sm text-gray-600 hover:text-black">
-            {isLogin ? "Need a Vault? Register" : "Have a Vault? Login"}
-          </button>
+
+          {/* Footer Toggle */}
+          <div className="mt-8 text-center pt-6 border-t border-slate-100">
+            <button 
+              onClick={() => { setIsLogin(!isLogin); setLoginStep(1); }}
+              className="text-sm font-medium text-slate-500 hover:text-blue-600 transition-colors flex items-center justify-center gap-1 mx-auto"
+            >
+              {isLogin ? (
+                <>Don't have an account? <span className="text-blue-600">Register</span></>
+              ) : (
+                <>Already have an account? <span className="text-blue-600">Sign In</span></>
+              )}
+            </button>
+          </div>
         </div>
       </div>
     </div>
