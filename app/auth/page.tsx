@@ -4,7 +4,7 @@ import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
 import { deriveKey } from '@/lib/crypto';
 import { useAuth } from '@/context/AuthContext';
-import UAParser from 'ua-parser-js';
+import { UAParser } from 'ua-parser-js';
 
 export default function AuthPage() {
   const [email, setEmail] = useState('');
