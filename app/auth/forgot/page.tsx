@@ -10,13 +10,13 @@ export default function ForgotPage() {
   const handleReset = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
-    // This sends a Supabase "Reset Password" email
+    // Send standard Supabase Reset Link
     const { error } = await supabase.auth.resetPasswordForEmail(email, {
       redirectTo: `${window.location.origin}/auth/update-password`,
     });
     setLoading(false);
     if (error) toast.error(error.message);
-    else toast.success("Check your email for the reset link.");
+    else toast.success("Check your email for the reset link!");
   };
 
   return (
