@@ -6,9 +6,9 @@ import { supabase } from '@/lib/supabase';
 import { encryptData, decryptData, generatePassword } from '@/lib/crypto';
 import { useAuth } from '@/context/AuthContext';
 import { 
-  Copy, Plus, LogOut, Edit3, Save, ExternalLink, 
+  Copy, Plus, Edit3, Save, ExternalLink, 
   Loader2, Search, Lock, Key, Shield, Globe, User, 
-  FileText, X, ChevronRight, Eye, EyeOff
+  X, Trash2, Eye, EyeOff
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -35,7 +35,32 @@ export default function VaultDashboard() {
   // Form State
   const [form, setForm] = useState({ name: '', url: '', username: '', password: '', description: '' });
 
-  // 1. AUTH CHECK
+  // --- 1. AUTO LOGOUT LOGIC (30 Mins) ---
+  useEffect(() => {
+    let logoutTimer: NodeJS.Timeout;
+
+    const resetTimer = () => {
+      clearTimeout(logoutTimer);
+      logoutTimer = setTimeout(() => {
+        toast.warning("Session timed out due to inactivity.");
+        logout();
+      }, 30 * 60 * 1000); 
+    };
+
+    window.addEventListener('mousemove', resetTimer);
+    window.addEventListener('keydown', resetTimer);
+    window.addEventListener('click', resetTimer);
+    resetTimer();
+
+    return () => {
+      clearTimeout(logoutTimer);
+      window.removeEventListener('mousemove', resetTimer);
+      window.removeEventListener('keydown', resetTimer);
+      window.removeEventListener('click', resetTimer);
+    };
+  }, [logout]);
+
+  // --- 2. AUTH CHECK ---
   useEffect(() => {
     let mounted = true;
     const checkSession = async () => {
@@ -74,6 +99,18 @@ export default function VaultDashboard() {
     }
   };
 
+  const handleDelete = async (id: string) => {
+    if (!window.confirm("Are you sure you want to delete this item? This cannot be undone.")) return;
+
+    const { error } = await supabase.from('vault_items').delete().eq('id', id);
+    if (error) {
+      toast.error("Failed to delete item.");
+    } else {
+      toast.success("Item deleted permanently.");
+      loadItems(); 
+    }
+  };
+
   const handleSave = async () => {
     if (!masterKey) return;
     if (!form.name || !form.password) return toast.error("Name and Secret are required.");
@@ -82,6 +119,7 @@ export default function VaultDashboard() {
     
     try {
       if (editingId) {
+          // UPDATE
           await supabase.from('vault_items').update({
               name: form.name,
               username: form.username,
@@ -93,6 +131,7 @@ export default function VaultDashboard() {
           }).eq('id', editingId);
           toast.success("Item updated successfully.");
       } else {
+          // INSERT
           await supabase.from('vault_items').insert({
               user_id: user.id,
               type: addType,
@@ -167,7 +206,7 @@ export default function VaultDashboard() {
               <div className="bg-gray-900 text-white p-1.5 rounded-md">
                 <Shield size={18} />
               </div>
-              <span className="font-semibold text-lg tracking-tight">Fortress Vault</span>
+              <span className="font-semibold text-lg tracking-tight">AymnSecureVault</span>
             </div>
 
             <div className="flex items-center gap-4">
@@ -279,7 +318,7 @@ export default function VaultDashboard() {
             </h3>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {passwords.map((item) => (
-                  <VaultCard key={item.id} item={item} onEdit={() => startEdit(item)} />
+                  <VaultCard key={item.id} item={item} onEdit={() => startEdit(item)} onDelete={() => handleDelete(item.id)} />
               ))}
             </div>
           </div>
@@ -293,7 +332,7 @@ export default function VaultDashboard() {
             </h3>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {apiKeys.map((item) => (
-                  <VaultCard key={item.id} item={item} onEdit={() => startEdit(item)} isApi={true} />
+                  <VaultCard key={item.id} item={item} onEdit={() => startEdit(item)} onDelete={() => handleDelete(item.id)} isApi={true} />
               ))}
             </div>
           </div>
@@ -315,7 +354,7 @@ export default function VaultDashboard() {
 }
 
 // --- SUB-COMPONENT: CARD ---
-function VaultCard({ item, onEdit, isApi = false }: { item: any, onEdit: () => void, isApi?: boolean }) {
+function VaultCard({ item, onEdit, onDelete, isApi = false }: { item: any, onEdit: () => void, onDelete: () => void, isApi?: boolean }) {
     const copyToClipboard = (text: string) => {
         navigator.clipboard.writeText(text);
         toast.success("Copied to clipboard");
@@ -333,14 +372,19 @@ function VaultCard({ item, onEdit, isApi = false }: { item: any, onEdit: () => v
                         {item.username && <p className="text-xs text-gray-500 truncate">{item.username}</p>}
                     </div>
                 </div>
+                
+                {/* ACTIONS */}
                 <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                     {item.url && (
-                        <a href={item.url} target="_blank" rel="noopener noreferrer" className="p-1.5 text-gray-400 hover:text-gray-700 hover:bg-gray-50 rounded">
+                        <a href={item.url} target="_blank" rel="noopener noreferrer" className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded" title="Open Link">
                             <ExternalLink size={14} />
                         </a>
                     )}
-                    <button onClick={onEdit} className="p-1.5 text-gray-400 hover:text-gray-700 hover:bg-gray-50 rounded">
+                    <button onClick={onEdit} className="p-1.5 text-gray-400 hover:text-gray-900 hover:bg-gray-100 rounded" title="Edit">
                         <Edit3 size={14} />
+                    </button>
+                    <button onClick={onDelete} className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded" title="Delete">
+                        <Trash2 size={14} />
                     </button>
                 </div>
             </div>

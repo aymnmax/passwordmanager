@@ -50,7 +50,7 @@ export default function AuthPage() {
     try {
       const secret = authenticator.generateSecret();
       setGeneratedSecret(secret);
-      const otpauth = authenticator.keyuri(form.email, 'Fortress Vault', secret);
+      const otpauth = authenticator.keyuri(form.email, 'AymnSecureVault', secret);
       const imageUrl = await QRCode.toDataURL(otpauth);
       setQrImage(imageUrl);
       setRegStep(2); 
@@ -189,24 +189,13 @@ export default function AuthPage() {
     }
   };
 
-  // --- UPDATED COMPLETE LOGIN (FIXES SESSION INVALID) ---
   const completeLogin = async (user: any, deviceName: string) => {
     try {
-      // 1. Derive Key
       const key = await deriveKey(form.password, user?.id!);
-      
-      // 2. FORCE SAVE TO SESSION STORAGE (Crucial Fix)
-      // We do this manually here so it is 100% ready before redirect
       const exported = await window.crypto.subtle.exportKey('jwk', key);
       sessionStorage.setItem('secure_vault_key', JSON.stringify(exported));
-      
-      // 3. Update Context
       setMasterKey(key);
-      
-      // 4. Log Session
       await supabase.from('login_sessions').insert({ user_id: user?.id, device_name: deviceName });
-      
-      // 5. Redirect
       router.push('/vault');
     } catch (e) {
       console.error(e);
@@ -217,12 +206,28 @@ export default function AuthPage() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-slate-50 p-4 font-sans text-slate-900">
       <div className="bg-white w-full max-w-4xl rounded-2xl shadow-xl overflow-hidden flex flex-col md:flex-row border border-slate-100">
+        
+        {/* BRANDING SIDEBAR */}
         <div className="md:w-5/12 bg-slate-900 p-8 text-white flex flex-col justify-center relative overflow-hidden">
-           <ShieldCheck className="w-12 h-12 text-blue-400 mb-4" />
-           <h1 className="text-3xl font-bold mb-2">Fortress Vault</h1>
-           <p className="text-slate-400">Secure. Private. Zero-Knowledge.</p>
+           <ShieldCheck className="w-12 h-12 text-blue-400 mb-6" />
+           <h1 className="text-3xl font-bold mb-4">AymnSecureVault</h1>
+           
+           <div className="space-y-4 text-slate-300 text-sm leading-relaxed">
+             <p className="flex items-start gap-2">
+               <span className="text-blue-400 mt-1">✓</span> Built with zero-knowledge encryption.
+             </p>
+             <p className="flex items-start gap-2">
+               <span className="text-blue-400 mt-1">✓</span> Your passwords are encrypted before they reach us.
+             </p>
+             <p className="flex items-start gap-2">
+               <span className="text-blue-400 mt-1">✓</span> Even we can’t read them.
+             </p>
+           </div>
+
            <div className="absolute top-0 right-0 w-64 h-64 bg-blue-600 rounded-full blur-3xl opacity-20 transform translate-x-1/2 -translate-y-1/2" />
         </div>
+
+        {/* FORM SIDE */}
         <div className="md:w-7/12 p-10 flex flex-col justify-center">
           {isLogin ? (
             <>
