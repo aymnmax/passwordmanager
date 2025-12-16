@@ -1,8 +1,3 @@
-// Configuration
-const PBKDF2_ITERATIONS = 100000;
-const KEY_LENGTH = 256;
-
-// 1. Derive Key from Master Password
 export async function deriveKey(password: string, salt: string): Promise<CryptoKey> {
   const enc = new TextEncoder();
   const keyMaterial = await window.crypto.subtle.importKey(
@@ -10,27 +5,26 @@ export async function deriveKey(password: string, salt: string): Promise<CryptoK
     enc.encode(password),
     { name: "PBKDF2" },
     false,
-    ["deriveKey"]
+    ["deriveBits", "deriveKey"]
   );
 
   return window.crypto.subtle.deriveKey(
     {
       name: "PBKDF2",
       salt: enc.encode(salt),
-      iterations: PBKDF2_ITERATIONS,
+      iterations: 100000,
       hash: "SHA-256",
     },
     keyMaterial,
-    { name: "AES-GCM", length: KEY_LENGTH },
-    false,
+    { name: "AES-GCM", length: 256 },
+    true, // <--- THIS MUST BE TRUE (extractable)
     ["encrypt", "decrypt"]
   );
 }
 
-// 2. Encrypt Data
-export async function encryptData(key: CryptoKey, data: string) {
+export async function encryptData(key: CryptoKey, data: string): Promise<{ ciphertext: string; iv: string }> {
   const enc = new TextEncoder();
-  const iv = window.crypto.getRandomValues(new Uint8Array(12)); // 96-bit IV
+  const iv = window.crypto.getRandomValues(new Uint8Array(12));
   
   const encrypted = await window.crypto.subtle.encrypt(
     { name: "AES-GCM", iv: iv },
@@ -44,25 +38,22 @@ export async function encryptData(key: CryptoKey, data: string) {
   };
 }
 
-// 3. Decrypt Data
-export async function decryptData(key: CryptoKey, ciphertext: string, iv: string) {
+export async function decryptData(key: CryptoKey, ciphertext: string, iv: string): Promise<string> {
   const dec = new TextDecoder();
   const decrypted = await window.crypto.subtle.decrypt(
     { name: "AES-GCM", iv: Buffer.from(iv, 'base64') },
     key,
     Buffer.from(ciphertext, 'base64')
   );
+
   return dec.decode(decrypted);
 }
 
-// 4. Generate Strong Password
-export function generatePassword(length = 16) {
+export function generatePassword(length = 16): string {
   const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()_+";
   let retVal = "";
-  const values = new Uint32Array(length);
-  window.crypto.getRandomValues(values);
-  for (let i = 0; i < length; i++) {
-    retVal += charset[values[i] % charset.length];
+  for (let i = 0, n = charset.length; i < length; ++i) {
+    retVal += charset.charAt(Math.floor(Math.random() * n));
   }
   return retVal;
 }
