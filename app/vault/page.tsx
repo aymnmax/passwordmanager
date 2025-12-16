@@ -20,7 +20,8 @@ const Badge = ({ children, color }: { children: React.ReactNode, color: string }
 );
 
 export default function VaultDashboard() {
-  const { masterKey, user, logout } = useAuth();
+  // Added setMasterKey to handle the restoration
+  const { masterKey, setMasterKey, user, logout } = useAuth();
   const router = useRouter();
   
   // Data & UI State
@@ -60,27 +61,61 @@ export default function VaultDashboard() {
     };
   }, [logout]);
 
-  // --- 2. AUTH CHECK ---
+  // --- 2. AUTH & KEY RESTORATION ---
   useEffect(() => {
     let mounted = true;
-    const checkSession = async () => {
-      await new Promise(r => setTimeout(r, 500));
-      const storedKey = sessionStorage.getItem('secure_vault_key');
-      const { data: { session } } = await supabase.auth.getSession();
 
-      if (!session || (!masterKey && !storedKey)) {
+    const restoreSession = async () => {
+      // 1. Check if Supabase session exists
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
         if (mounted) router.push('/auth');
         return;
       }
+
+      // 2. Check for Master Key
+      if (!masterKey) {
+        // If no masterKey in RAM, try to get it from Session Storage
+        const storedKey = sessionStorage.getItem('secure_vault_key');
+        
+        if (storedKey) {
+          try {
+            // RESTORE THE KEY
+            const jwk = JSON.parse(storedKey);
+            const restoredKey = await window.crypto.subtle.importKey(
+              "jwk",
+              jwk,
+              { name: "AES-GCM" },
+              true,
+              ["encrypt", "decrypt"]
+            );
+            setMasterKey(restoredKey); // Save it back to Context
+          } catch (e) {
+            console.error("Key restoration failed", e);
+            logout(); // Corrupted key
+            return;
+          }
+        } else {
+          // No key anywhere? Logout.
+          if (mounted) {
+            toast.error("Session expired. Please login again.");
+            router.push('/auth');
+          }
+          return;
+        }
+      }
+
+      // 3. Success
       if (mounted) {
         setPageLoading(false);
-        if (masterKey) loadItems();
       }
     };
-    checkSession();
-    return () => { mounted = false; };
-  }, [user, masterKey]);
 
+    restoreSession();
+    return () => { mounted = false; };
+  }, [user, masterKey, setMasterKey, router, logout]);
+
+  // Load items whenever masterKey becomes available
   useEffect(() => {
     if (masterKey) loadItems();
   }, [masterKey]);
