@@ -2,8 +2,9 @@
 import { useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { toast } from 'sonner';
-import { ShieldCheck, Mail, HelpCircle, AlertTriangle, ArrowRight, Loader2 } from 'lucide-react';
+import { ShieldCheck, Mail, HelpCircle, AlertTriangle, ArrowRight, Loader2, Smartphone } from 'lucide-react';
 import { useRouter } from 'next/navigation';
+import { authenticator } from 'otplib';
 
 const QUESTIONS: Record<string, string> = {
   pet: "What was your first pet's name?",
@@ -13,21 +14,32 @@ const QUESTIONS: Record<string, string> = {
 
 export default function ForgotPage() {
   const router = useRouter();
-  const [step, setStep] = useState(1); // 1=Email, 2=Question
+  const [step, setStep] = useState(1); // 1=Email, 2=Verification
   const [loading, setLoading] = useState(false);
+  
+  // Form Data
   const [email, setEmail] = useState('');
   const [question, setQuestion] = useState('');
   const [answer, setAnswer] = useState('');
+  const [authCode, setAuthCode] = useState(''); // New TOTP Field
   
-  // State for failed attempts
   const [errorCount, setErrorCount] = useState(0);
+
+  // --- HELPER: SHA-256 Hashing ---
+  const hashAnswer = async (text: string) => {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(text.toLowerCase().trim());
+    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+    return Array.from(new Uint8Array(hashBuffer))
+      .map(b => b.toString(16).padStart(2, '0'))
+      .join('');
+  };
 
   // Step 1: Find User & Get Question
   const handleFindUser = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     try {
-      // Call the RPC function we just created
       const { data: qCode, error } = await supabase.rpc('get_security_question', { 
         email_input: email 
       });
@@ -44,43 +56,50 @@ export default function ForgotPage() {
     }
   };
 
-  // Step 2: Verify Answer & Send Email
+  // Step 2: Verify Answer AND Authenticator
   const handleVerifyAndSend = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     
     try {
-      const answerHash = btoa(answer.toLowerCase().trim());
+      // --- UPDATED: SHA-256 HASHING ---
+      const answerHash = await hashAnswer(answer);
 
-      // Call the RPC verification function
-      const { data: isValid, error } = await supabase.rpc('verify_security_answer', {
+      // 1. Check Security Answer against DB
+      const { data: secret, error } = await supabase.rpc('verify_security_answer', {
         email_input: email,
-        answer_hash_input: answerHash
+        answer_hash_input: answerHash // Sending the SHA-256 hash
       });
 
       if (error) throw error;
 
-      if (!isValid) {
-        // Wrong Answer Logic
+      // If secret is null, it means the Security Answer was WRONG
+      if (secret === null) {
         setErrorCount(prev => prev + 1);
-        if (errorCount >= 2) {
-           throw new Error("Maximum attempts reached. Contact creator: aliaymanwork@gmail.com");
-        }
-        throw new Error("Incorrect Answer. Please try again.");
+        if (errorCount >= 2) throw new Error("Maximum attempts reached. Contact creator: aliaymanwork@gmail.com");
+        throw new Error("Incorrect Security Answer.");
       }
 
-      // CORRECT ANSWER: Send the Reset Email
+      // 2. Check Authenticator Code (If user has one set up)
+      if (secret) {
+        if (!authCode) throw new Error("Please enter your Authenticator Code.");
+        
+        const isValidTotp = authenticator.check(authCode, secret);
+        if (!isValidTotp) throw new Error("Invalid Authenticator Code.");
+      }
+
+      // 3. SUCCESS -> Send Email
       const { error: resetError } = await supabase.auth.resetPasswordForEmail(email, {
-        redirectTo: `${window.location.origin}/auth/update-password`, // This fixes the 404
+        redirectTo: `${window.location.origin}/auth/update-password`,
       });
 
       if (resetError) throw resetError;
 
-      toast.success("Security verified! Password reset link sent to your email.");
-      router.push('/auth'); // Go back to login
+      toast.success("Identity Verified! Password reset link sent.");
+      router.push('/auth');
 
     } catch (err: any) {
-      toast.error(err.message, { duration: 5000 });
+      toast.error(err.message);
     } finally {
       setLoading(false);
     }
@@ -120,22 +139,38 @@ export default function ForgotPage() {
                <button type="button" onClick={() => router.push('/auth')} className="w-full text-sm text-slate-500 hover:text-slate-800">Back to Login</button>
             </form>
           ) : (
-            <form onSubmit={handleVerifyAndSend} className="space-y-4 animate-in slide-in-from-right">
-               <div className="bg-blue-50 p-3 rounded-lg border border-blue-100 text-blue-800 text-sm font-medium flex gap-2">
-                  <HelpCircle className="shrink-0" size={18} />
-                  {question}
-               </div>
-
-               <div className="space-y-1">
-                 <label className="text-xs font-bold uppercase text-slate-500">Your Answer</label>
+            <form onSubmit={handleVerifyAndSend} className="space-y-5 animate-in slide-in-from-right">
+               
+               {/* Security Question Section */}
+               <div>
+                 <div className="bg-blue-50 p-3 rounded-lg border border-blue-100 text-blue-800 text-sm font-medium flex gap-2 mb-2">
+                    <HelpCircle className="shrink-0" size={18} />
+                    {question}
+                 </div>
                  <input 
                     type="text" 
                     required 
                     className="w-full p-3 border rounded-lg focus:ring-2 focus:ring-blue-600 outline-none" 
-                    placeholder="Type your answer..."
+                    placeholder="Your Answer"
                     value={answer}
                     onChange={e => setAnswer(e.target.value)}
                  />
+               </div>
+
+               {/* Authenticator Code Section */}
+               <div>
+                  <label className="text-xs font-bold uppercase text-slate-500 mb-1 flex items-center gap-1">
+                     <Smartphone size={12} /> Authenticator Code
+                  </label>
+                  <input 
+                    type="text" 
+                    required 
+                    maxLength={6}
+                    className="w-full p-3 border rounded-lg focus:ring-2 focus:ring-blue-600 outline-none font-mono tracking-widest text-center text-lg" 
+                    placeholder="000 000"
+                    value={authCode}
+                    onChange={e => setAuthCode(e.target.value)}
+                  />
                </div>
 
                {errorCount > 0 && (

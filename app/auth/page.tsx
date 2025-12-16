@@ -41,6 +41,16 @@ export default function AuthPage() {
   const { setMasterKey } = useAuth();
   const router = useRouter();
 
+  // --- HELPER: SHA-256 Hashing ---
+  const hashAnswer = async (text: string) => {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(text.toLowerCase().trim());
+    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+    return Array.from(new Uint8Array(hashBuffer))
+      .map(b => b.toString(16).padStart(2, '0'))
+      .join('');
+  };
+
   // ================= REGISTER FLOW =================
   const handleRegInit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -68,14 +78,16 @@ export default function AuthPage() {
       const isValid = authenticator.check(authCode, generatedSecret);
       if (!isValid) throw new Error("Invalid Code. Please scan the QR again.");
 
-      const answerHash = btoa(form.securityA.toLowerCase().trim());
+      // --- UPDATED: SHA-256 HASHING ---
+      const answerHash = await hashAnswer(form.securityA);
+      
       const { error } = await supabase.auth.signUp({ 
         email: form.email, 
         password: form.password,
         options: {
           data: {
             security_question: form.securityQ,
-            security_answer_hash: answerHash,
+            security_answer_hash: answerHash, // Saving the strong hash
             selected_animal: form.selectedImage,
             totp_secret: generatedSecret 
           }
