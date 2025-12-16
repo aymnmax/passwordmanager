@@ -9,7 +9,10 @@ import { toast } from 'sonner';
 import { UAParser } from 'ua-parser-js';
 import { authenticator } from 'otplib';
 import QRCode from 'qrcode';
-import { Loader2, Mail, Lock, ShieldCheck, HelpCircle, Smartphone } from 'lucide-react';
+import { 
+  Loader2, Mail, Lock, ShieldCheck, HelpCircle, Smartphone, 
+  X, CheckCircle2, Server, Key, EyeOff, Code
+} from 'lucide-react';
 
 const SECURITY_IMAGES = [
   { id: 'elephant', label: 'Elephant', icon: '🐘' },
@@ -23,6 +26,7 @@ const SECURITY_IMAGES = [
 export default function AuthPage() {
   const [isLogin, setIsLogin] = useState(true);
   const [loading, setLoading] = useState(false);
+  const [showSecurityInfo, setShowSecurityInfo] = useState(false);
 
   // LOGIN STATE
   const [loginStep, setLoginStep] = useState(1);
@@ -78,7 +82,6 @@ export default function AuthPage() {
       const isValid = authenticator.check(authCode, generatedSecret);
       if (!isValid) throw new Error("Invalid Code. Please scan the QR again.");
 
-      // --- UPDATED: SHA-256 HASHING ---
       const answerHash = await hashAnswer(form.securityA);
       
       const { error } = await supabase.auth.signUp({ 
@@ -87,7 +90,7 @@ export default function AuthPage() {
         options: {
           data: {
             security_question: form.securityQ,
-            security_answer_hash: answerHash, // Saving the strong hash
+            security_answer_hash: answerHash,
             selected_animal: form.selectedImage,
             totp_secret: generatedSecret 
           }
@@ -216,7 +219,50 @@ export default function AuthPage() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-slate-50 p-4 font-sans text-slate-900">
+    <div className="min-h-screen flex items-center justify-center bg-slate-50 p-4 font-sans text-slate-900 relative">
+      
+      {/* SECURITY INFO MODAL */}
+      {showSecurityInfo && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-in fade-in">
+           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden">
+              <div className="bg-slate-900 p-4 flex justify-between items-center text-white">
+                 <h3 className="font-bold flex items-center gap-2"><ShieldCheck size={20}/> Security Architecture</h3>
+                 <button onClick={()=>setShowSecurityInfo(false)} className="hover:bg-slate-700 p-1 rounded"><X size={20}/></button>
+              </div>
+              <div className="p-6 space-y-6">
+                 
+                 <div className="flex gap-4">
+                    <div className="bg-blue-100 p-3 rounded-lg h-fit text-blue-600"><EyeOff size={24}/></div>
+                    <div>
+                       <h4 className="font-bold text-slate-900">Zero-Knowledge Proof</h4>
+                       <p className="text-sm text-slate-500 leading-relaxed">Your data is encrypted <strong>on your device</strong> using your password. We never receive your password or your unencrypted data. Even we can't see it.</p>
+                    </div>
+                 </div>
+
+                 <div className="flex gap-4">
+                    <div className="bg-green-100 p-3 rounded-lg h-fit text-green-600"><Key size={24}/></div>
+                    <div>
+                       <h4 className="font-bold text-slate-900">Military-Grade Encryption</h4>
+                       <p className="text-sm text-slate-500 leading-relaxed">We use <strong>AES-256 GCM</strong> encryption and <strong>PBKDF2-SHA256</strong> key derivation. These are the same standards used by banks and governments.</p>
+                    </div>
+                 </div>
+
+                 <div className="flex gap-4">
+                    <div className="bg-purple-100 p-3 rounded-lg h-fit text-purple-600"><Server size={24}/></div>
+                    <div>
+                       <h4 className="font-bold text-slate-900">Blind Storage</h4>
+                       <p className="text-sm text-slate-500 leading-relaxed">Our servers only store "encrypted blobs" (random noise). Without your specific Master Password, this data is mathematically impossible to read.</p>
+                    </div>
+                 </div>
+
+                 <button onClick={()=>setShowSecurityInfo(false)} className="w-full bg-slate-900 text-white font-bold py-3 rounded-lg hover:bg-slate-800">
+                    Understood
+                 </button>
+              </div>
+           </div>
+        </div>
+      )}
+
       <div className="bg-white w-full max-w-4xl rounded-2xl shadow-xl overflow-hidden flex flex-col md:flex-row border border-slate-100">
         
         {/* BRANDING SIDEBAR */}
@@ -224,15 +270,15 @@ export default function AuthPage() {
            <ShieldCheck className="w-12 h-12 text-blue-400 mb-6" />
            <h1 className="text-3xl font-bold mb-4">AymnSecureVault</h1>
            
-           <div className="space-y-4 text-slate-300 text-sm leading-relaxed">
+           <div className="space-y-4 text-slate-300 text-sm leading-relaxed z-10 relative">
              <p className="flex items-start gap-2">
-               <span className="text-blue-400 mt-1">✓</span> Built with zero-knowledge encryption.
+               <span className="text-blue-400 mt-1"><CheckCircle2 size={16}/></span> Built with zero-knowledge encryption.
              </p>
              <p className="flex items-start gap-2">
-               <span className="text-blue-400 mt-1">✓</span> Your passwords are encrypted before they reach us.
+               <span className="text-blue-400 mt-1"><CheckCircle2 size={16}/></span> Your passwords are encrypted before they reach us.
              </p>
              <p className="flex items-start gap-2">
-               <span className="text-blue-400 mt-1">✓</span> Even we can’t read them.
+               <span className="text-blue-400 mt-1"><CheckCircle2 size={16}/></span> Even we can’t read them.
              </p>
            </div>
 
@@ -320,9 +366,29 @@ export default function AuthPage() {
               )}
             </>
           )}
-          <div className="mt-6 text-center border-t pt-4">
-             <button onClick={()=>{setIsLogin(!isLogin); setLoginStep(1); setRegStep(1)}} className="text-blue-600 font-medium">{isLogin ? "Need an account? Register" : "Have an account? Sign In"}</button>
+
+          {/* FOOTER ACTIONS */}
+          <div className="mt-6 text-center border-t pt-4 space-y-3">
+             <button onClick={()=>{setIsLogin(!isLogin); setLoginStep(1); setRegStep(1)}} className="text-blue-600 font-medium block w-full">
+               {isLogin ? "Need an account? Register" : "Have an account? Sign In"}
+             </button>
+             
+             {/* SECURITY INFO BUTTON */}
+             <button onClick={()=>setShowSecurityInfo(true)} className="text-xs text-slate-400 hover:text-slate-600 flex items-center justify-center gap-1 mx-auto transition-colors">
+                <Lock size={12}/> How is my data secured?
+             </button>
+
+             {/* CREATOR INFO */}
+             <div className="pt-4 border-t border-slate-50">
+               <p className="text-[10px] text-slate-400 font-medium flex items-center justify-center gap-1">
+                 Created by <span className="text-slate-600 font-bold flex items-center gap-0.5"><Code size={10}/> aymanxsec</span>
+               </p>
+               <a href="mailto:aliaymanwork@gmail.com" className="text-[10px] text-blue-400 hover:text-blue-600 transition-colors mt-1 block">
+                 aliaymanwork@gmail.com
+               </a>
+             </div>
           </div>
+
         </div>
       </div>
     </div>
