@@ -4,7 +4,7 @@ import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
 import { encryptData, decryptData, generatePassword } from '@/lib/crypto';
 import { useAuth } from '@/context/AuthContext';
-import { Copy, Plus, LogOut, Edit3, Save, AlertTriangle, ExternalLink, Loader2, Key, Search } from 'lucide-react';
+import { Copy, Plus, LogOut, Edit3, Save, AlertTriangle, ExternalLink, Loader2, Key } from 'lucide-react';
 import { toast } from 'sonner';
 
 export default function VaultDashboard() {
@@ -15,7 +15,7 @@ export default function VaultDashboard() {
   const [isAdding, setIsAdding] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   
-  // Loading State for the Page itself
+  // PAGE LOADING STATE
   const [pageLoading, setPageLoading] = useState(true);
 
   // Form State
@@ -23,33 +23,45 @@ export default function VaultDashboard() {
 
   // 1. SECURE AUTH CHECK
   useEffect(() => {
+    let mounted = true;
+
     const checkSession = async () => {
-      // Give the AuthContext a moment to restore the key from SessionStorage
+      // Small delay to allow SessionStorage to populate after login redirect
+      await new Promise(r => setTimeout(r, 500));
+
       const storedKey = sessionStorage.getItem('secure_vault_key');
       
-      if (!user) {
-        // No user at all? Bye.
-        router.push('/auth');
+      const { data: { session } } = await supabase.auth.getSession();
+
+      if (!session) {
+        if (mounted) router.push('/auth');
         return;
       }
 
+      // If we have no key in RAM (masterKey) AND no key in Storage...
       if (!masterKey && !storedKey) {
-        // User is here, but NO KEY exists in RAM or Storage?
-        // This means they refreshed and lost the password, or hacked the URL.
-        toast.error("Session invalid. Please login again.");
-        router.push('/auth');
+        if (mounted) {
+           toast.error("Session expired. Please login again.");
+           router.push('/auth');
+        }
         return;
       }
 
-      // If we have a key (or it's being restored), stop loading and show vault
-      if (masterKey || storedKey) {
+      // Success!
+      if (mounted) {
         setPageLoading(false);
         if (masterKey) loadItems();
       }
     };
 
     checkSession();
+    return () => { mounted = false; };
   }, [user, masterKey]);
+
+  // Load items whenever masterKey becomes available
+  useEffect(() => {
+    if (masterKey) loadItems();
+  }, [masterKey]);
 
   const loadItems = async () => {
     if (!masterKey) return;
@@ -124,8 +136,7 @@ export default function VaultDashboard() {
       return days > 30;
   };
 
-  // Prevent rendering if still checking auth
-  if (pageLoading || !masterKey) {
+  if (pageLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-50">
         <div className="text-center">
@@ -204,7 +215,6 @@ export default function VaultDashboard() {
                                 <AlertTriangle size={10} /> OLD PASS
                             </div>
                         )}
-                        
                         <div className="flex justify-between items-start mb-2">
                             <h3 className="text-lg font-bold truncate text-slate-800">{item.name}</h3>
                             <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -212,21 +222,13 @@ export default function VaultDashboard() {
                                 {item.url && <a href={item.url} target="_blank" className="p-1.5 hover:bg-slate-100 text-slate-600 rounded-md transition-all"><ExternalLink size={16} /></a>}
                             </div>
                         </div>
-
                         {tab === 'password' && <p className="font-mono text-xs text-slate-500 mb-3 bg-slate-50 p-1 rounded w-fit">{item.username}</p>}
-                        
                         <div className="bg-slate-800 text-white rounded-lg p-3 flex justify-between items-center mb-3 shadow-inner">
                             <span className="font-mono text-sm tracking-widest truncate w-2/3 select-all">•••••••••••••</span>
-                            <button onClick={() => { navigator.clipboard.writeText(item.secret); toast.success("Copied!"); }} className="text-xs font-bold bg-slate-700 hover:bg-slate-600 px-2 py-1 rounded flex items-center gap-1 transition-colors">
-                                <Copy size={12}/> COPY
-                            </button>
+                            <button onClick={() => { navigator.clipboard.writeText(item.secret); toast.success("Copied!"); }} className="text-xs font-bold bg-slate-700 hover:bg-slate-600 px-2 py-1 rounded flex items-center gap-1 transition-colors"><Copy size={12}/> COPY</button>
                         </div>
-                        
                         {item.description && <p className="text-xs text-slate-500 italic border-t border-slate-100 pt-2 mt-2">{item.description}</p>}
-                        
-                        <div className="mt-3 text-[10px] text-slate-300 font-bold uppercase text-right">
-                             UPDATED: {new Date(item.updated_at || item.created_at).toLocaleDateString()}
-                        </div>
+                        <div className="mt-3 text-[10px] text-slate-300 font-bold uppercase text-right">UPDATED: {new Date(item.updated_at || item.created_at).toLocaleDateString()}</div>
                     </div>
                 )
             })}
