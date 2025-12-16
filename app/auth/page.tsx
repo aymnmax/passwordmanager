@@ -9,7 +9,7 @@ import { toast } from 'sonner';
 import { UAParser } from 'ua-parser-js';
 import { authenticator } from 'otplib';
 import QRCode from 'qrcode';
-import { Loader2, Mail, Lock, ShieldCheck, HelpCircle, QrCode, Smartphone } from 'lucide-react';
+import { Loader2, Mail, Lock, ShieldCheck, HelpCircle, Smartphone } from 'lucide-react';
 
 const SECURITY_IMAGES = [
   { id: 'elephant', label: 'Elephant', icon: '🐘' },
@@ -23,10 +23,10 @@ const SECURITY_IMAGES = [
 export default function AuthPage() {
   const [isLogin, setIsLogin] = useState(true);
   const [loading, setLoading] = useState(false);
-  
+
   // LOGIN STATE
-  // 1=Creds, 2=Image (Final), 3=Authenticator (New Device)
-  const [loginStep, setLoginStep] = useState(1); 
+  // 1=Creds, 2=Authenticator (New Device Only), 3=Image (Final)
+  const [loginStep, setLoginStep] = useState(1);
   const [authCode, setAuthCode] = useState('');
   const [isNewDeviceFlow, setIsNewDeviceFlow] = useState(false);
 
@@ -45,23 +45,21 @@ export default function AuthPage() {
 
   // ================= REGISTER FLOW =================
 
-  // Step 1: Validate Form & Generate QR
+  // 1. Generate QR Code
   const handleRegInit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!form.selectedImage) return toast.error('Pick a security image first!');
     
     setLoading(true);
     try {
-      // 1. Generate Secret
       const secret = authenticator.generateSecret();
       setGeneratedSecret(secret);
 
-      // 2. Generate QR Code URL
       const otpauth = authenticator.keyuri(form.email, 'Fortress Vault', secret);
       const imageUrl = await QRCode.toDataURL(otpauth);
       
       setQrImage(imageUrl);
-      setRegStep(2); // Move to Scan Step
+      setRegStep(2); 
     } catch (err) {
       toast.error('Error generating QR code');
     } finally {
@@ -69,19 +67,19 @@ export default function AuthPage() {
     }
   };
 
-  // Step 2: Verify Code & Create Account
+  // 2. Verify QR & Create Account (Triggers Supabase Email)
   const handleRegFinal = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
 
     try {
-      // 1. Verify the user actually scanned it
+      // Verify they scanned it correctly
       const isValid = authenticator.check(authCode, generatedSecret);
-      if (!isValid) throw new Error("Invalid Code. Scan the QR again.");
+      if (!isValid) throw new Error("Invalid Code. Please scan the QR again.");
 
       const answerHash = btoa(form.securityA.toLowerCase().trim());
 
-      // 2. Create User (Save Secret in Metadata)
+      // Create User -> Supabase sends confirmation email automatically
       const { error } = await supabase.auth.signUp({ 
         email: form.email, 
         password: form.password,
@@ -90,17 +88,18 @@ export default function AuthPage() {
             security_question: form.securityQ,
             security_answer_hash: answerHash,
             selected_animal: form.selectedImage,
-            totp_secret: generatedSecret // <--- SAVING SECRET TO DB
+            totp_secret: generatedSecret // Save secret for future logins
           }
         }
       });
 
       if (error) throw error;
 
-      toast.success('Account created! Setup complete.');
+      toast.success('Account created! Please check your email to confirm.');
       setIsLogin(true);
       setRegStep(1);
       setForm({ email: '', password: '', securityQ: '', securityA: '', selectedImage: '' });
+      
     } catch (err: any) {
       toast.error(err.message);
     } finally {
@@ -111,19 +110,24 @@ export default function AuthPage() {
 
   // ================= LOGIN FLOW =================
 
-  // Step 1: Check Creds & Device
+  // 1. Check Credentials & Device Status
   const handleLoginInit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
 
     try {
-      // 1. Sign In
       const { error } = await supabase.auth.signInWithPassword({ 
         email: form.email, password: form.password 
       });
-      if (error) throw error;
+      
+      if (error) {
+         if (error.message.includes("Email not confirmed")) {
+             throw new Error("Please confirm your email address first.");
+         }
+         throw error;
+      }
 
-      // 2. Check Device
+      // Check Device Trust
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("Session Error");
 
@@ -131,6 +135,7 @@ export default function AuthPage() {
       const deviceName = `${parser.getBrowser().name} on ${parser.getOS().name}`;
       const deviceId = btoa(`${user.id}-${deviceName}`); 
       
+      // Store temp data for final step
       sessionStorage.setItem('temp_device', deviceName);
       sessionStorage.setItem('temp_device_id', deviceId);
 
@@ -141,13 +146,13 @@ export default function AuthPage() {
         .maybeSingle();
 
       if (trusted) {
-        // Trusted -> Go to Image
+        // Trusted -> Skip TOTP, Go to Image
         setIsNewDeviceFlow(false);
-        setLoginStep(2); 
+        setLoginStep(3); 
       } else {
         // New Device -> Go to Authenticator
         setIsNewDeviceFlow(true);
-        setLoginStep(3);
+        setLoginStep(2);
       }
 
     } catch (err: any) {
@@ -157,7 +162,7 @@ export default function AuthPage() {
     }
   };
 
-  // Step 2: Verify Authenticator (New Device Only)
+  // 2. Verify Authenticator (Only for New Devices)
   const handleAuthVerify = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
@@ -165,7 +170,7 @@ export default function AuthPage() {
     try {
       const { data: { user } } = await supabase.auth.getUser();
       
-      // Fetch Secret from DB
+      // Get secret from DB
       const { data: profile } = await supabase
         .from('user_profiles')
         .select('totp_secret')
@@ -174,12 +179,11 @@ export default function AuthPage() {
         
       if (!profile?.totp_secret) throw new Error("Security setup missing. Contact support.");
 
-      // Verify
       const isValid = authenticator.check(authCode, profile.totp_secret);
-      if (!isValid) throw new Error("Invalid Code. Try again.");
+      if (!isValid) throw new Error("Invalid Code.");
 
-      toast.success("Identity Verified. Now confirm Security Image.");
-      setLoginStep(2); // Go to Image Step
+      toast.success("Identity Verified. One last step.");
+      setLoginStep(3); // Go to Image Step
     } catch (err: any) {
       toast.error(err.message);
     } finally {
@@ -187,13 +191,13 @@ export default function AuthPage() {
     }
   };
 
-  // Step 3: Verify Image (Final)
+  // 3. Verify Security Image (Final Step)
   const handleLoginImage = async (imageId: string) => {
     setLoading(true);
     try {
       const { data: { user } } = await supabase.auth.getUser();
       
-      // 1. Check Image
+      // Check Image
       const { data: profile } = await supabase.from('user_profiles').select('selected_animal').eq('id', user?.id).single();
       if (!profile || profile.selected_animal !== imageId) {
         await supabase.auth.signOut();
@@ -201,7 +205,7 @@ export default function AuthPage() {
         throw new Error("Wrong Security Image! Login aborted.");
       }
 
-      // 2. Trust Device (If New)
+      // If New Device Flow -> Mark as Trusted now
       const deviceName = sessionStorage.getItem('temp_device')!;
       const deviceId = sessionStorage.getItem('temp_device_id')!;
 
@@ -213,7 +217,7 @@ export default function AuthPage() {
         });
       }
 
-      // 3. Complete
+      // Complete Login
       const key = await deriveKey(form.password, user?.id!);
       setMasterKey(key);
       await supabase.from('login_sessions').insert({ user_id: user?.id, device_name: deviceName });
@@ -236,6 +240,7 @@ export default function AuthPage() {
            <ShieldCheck className="w-12 h-12 text-blue-400 mb-4" />
            <h1 className="text-3xl font-bold mb-2">Fortress Vault</h1>
            <p className="text-slate-400">Secure. Private. Zero-Knowledge.</p>
+           <div className="absolute top-0 right-0 w-64 h-64 bg-blue-600 rounded-full blur-3xl opacity-20 transform translate-x-1/2 -translate-y-1/2" />
         </div>
 
         {/* Forms */}
@@ -244,11 +249,18 @@ export default function AuthPage() {
           {/* ================= LOGIN ================= */}
           {isLogin && (
             <>
+              {/* STEP 1: CREDENTIALS */}
               {loginStep === 1 && (
                 <form onSubmit={handleLoginInit} className="space-y-4">
                    <h2 className="text-2xl font-bold">Sign In</h2>
-                   <input type="email" required placeholder="Email" className="w-full p-3 rounded border" value={form.email} onChange={e=>setForm({...form, email: e.target.value})} />
-                   <input type="password" required placeholder="Password" className="w-full p-3 rounded border" value={form.password} onChange={e=>setForm({...form, password: e.target.value})} />
+                   <div className="relative">
+                      <Mail className="absolute left-3 top-3 text-gray-400 w-5 h-5"/>
+                      <input type="email" required placeholder="Email" className="w-full pl-10 p-3 rounded border" value={form.email} onChange={e=>setForm({...form, email: e.target.value})} />
+                   </div>
+                   <div className="relative">
+                      <Lock className="absolute left-3 top-3 text-gray-400 w-5 h-5"/>
+                      <input type="password" required placeholder="Password" className="w-full pl-10 p-3 rounded border" value={form.password} onChange={e=>setForm({...form, password: e.target.value})} />
+                   </div>
                    <button disabled={loading} className="w-full bg-blue-600 text-white p-3 rounded font-bold hover:bg-blue-700">
                      {loading ? <Loader2 className="animate-spin mx-auto" /> : 'Next'}
                    </button>
@@ -256,7 +268,8 @@ export default function AuthPage() {
                 </form>
               )}
 
-              {loginStep === 3 && (
+              {/* STEP 2: AUTHENTICATOR (NEW DEVICE ONLY) */}
+              {loginStep === 2 && (
                 <form onSubmit={handleAuthVerify} className="space-y-4 text-center">
                    <div className="mx-auto w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center mb-2">
                       <Smartphone className="text-blue-600" size={24} />
@@ -264,13 +277,15 @@ export default function AuthPage() {
                    <h2 className="text-xl font-bold">New Device Detected</h2>
                    <p className="text-sm text-gray-500">Open your Authenticator App and enter the code.</p>
                    <input className="w-full text-center text-3xl tracking-widest p-3 border rounded font-mono" placeholder="000 000" maxLength={6} value={authCode} onChange={e=>setAuthCode(e.target.value)} />
-                   <button disabled={loading} className="w-full bg-blue-600 text-white p-3 rounded font-bold">Verify Code</button>
+                   <button disabled={loading} className="w-full bg-blue-600 text-white p-3 rounded font-bold">Verify Identity</button>
                 </form>
               )}
 
-              {loginStep === 2 && (
+              {/* STEP 3: SECURITY IMAGE (ALWAYS) */}
+              {loginStep === 3 && (
                  <div className="text-center animate-in zoom-in">
                     <h2 className="text-xl font-bold mb-4">Security Image</h2>
+                    <p className="text-sm text-gray-500 mb-4">Click your security image to unlock.</p>
                     <div className="grid grid-cols-3 gap-3 mb-4">
                       {SECURITY_IMAGES.map(img => (
                         <button key={img.id} onClick={()=>handleLoginImage(img.id)} disabled={loading} className="p-4 border rounded hover:bg-blue-50 text-3xl transition transform hover:scale-105">
@@ -321,7 +336,7 @@ export default function AuthPage() {
                       {qrImage && <img src={qrImage} alt="Scan QR" className="w-48 h-48" />}
                    </div>
                    <h2 className="text-xl font-bold">Setup Authenticator</h2>
-                   <p className="text-sm text-gray-600">Scan this with Google Authenticator or Authy.</p>
+                   <p className="text-sm text-gray-600">Scan with Google Authenticator or Authy.</p>
                    
                    <input 
                       className="w-full text-center text-3xl tracking-widest p-3 border rounded font-mono mt-4" 
@@ -333,7 +348,7 @@ export default function AuthPage() {
                    />
                    
                    <button disabled={loading} className="w-full bg-green-600 text-white p-3 rounded font-bold hover:bg-green-700 mt-2">
-                     {loading ? <Loader2 className="animate-spin mx-auto" /> : 'Verify & Create Account'}
+                     {loading ? <Loader2 className="animate-spin mx-auto" /> : 'Confirm & Send Email'}
                    </button>
                    <button type="button" onClick={()=>setRegStep(1)} className="text-sm underline mt-2">Back</button>
                 </form>
