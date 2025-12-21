@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
 import { encryptData, decryptData, generatePassword } from '@/lib/crypto';
@@ -8,7 +8,7 @@ import { useAuth } from '@/context/AuthContext';
 import { 
   Copy, Plus, Edit3, Save, ExternalLink, 
   Loader2, Search, Lock, Key, Shield, Globe, User, 
-  X, Trash2, Eye, EyeOff
+  X, Trash2, Eye, EyeOff, AlertTriangle, ShieldAlert
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -20,7 +20,6 @@ const Badge = ({ children, color }: { children: React.ReactNode, color: string }
 );
 
 export default function VaultDashboard() {
-  // Added setMasterKey to handle the restoration
   const { masterKey, setMasterKey, user, logout } = useAuth();
   const router = useRouter();
   
@@ -32,6 +31,10 @@ export default function VaultDashboard() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [pageLoading, setPageLoading] = useState(true);
   const [showSecret, setShowSecret] = useState(false);
+
+  // New State for Password Health
+  const [pwnedWarning, setPwnedWarning] = useState<string | null>(null);
+  const [isCheckingPwned, setIsCheckingPwned] = useState(false);
 
   // Form State
   const [form, setForm] = useState({ name: '', url: '', username: '', password: '', description: '' });
@@ -66,37 +69,27 @@ export default function VaultDashboard() {
     let mounted = true;
 
     const restoreSession = async () => {
-      // 1. Check if Supabase session exists
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) {
         if (mounted) router.push('/auth');
         return;
       }
 
-      // 2. Check for Master Key
       if (!masterKey) {
-        // If no masterKey in RAM, try to get it from Session Storage
         const storedKey = sessionStorage.getItem('secure_vault_key');
-        
         if (storedKey) {
           try {
-            // RESTORE THE KEY
             const jwk = JSON.parse(storedKey);
             const restoredKey = await window.crypto.subtle.importKey(
-              "jwk",
-              jwk,
-              { name: "AES-GCM" },
-              true,
-              ["encrypt", "decrypt"]
+              "jwk", jwk, { name: "AES-GCM" }, true, ["encrypt", "decrypt"]
             );
-            setMasterKey(restoredKey); // Save it back to Context
+            setMasterKey(restoredKey);
           } catch (e) {
             console.error("Key restoration failed", e);
-            logout(); // Corrupted key
+            logout();
             return;
           }
         } else {
-          // No key anywhere? Logout.
           if (mounted) {
             toast.error("Session expired. Please login again.");
             router.push('/auth');
@@ -104,21 +97,68 @@ export default function VaultDashboard() {
           return;
         }
       }
-
-      // 3. Success
-      if (mounted) {
-        setPageLoading(false);
-      }
+      if (mounted) setPageLoading(false);
     };
 
     restoreSession();
     return () => { mounted = false; };
   }, [user, masterKey, setMasterKey, router, logout]);
 
-  // Load items whenever masterKey becomes available
   useEffect(() => {
     if (masterKey) loadItems();
   }, [masterKey]);
+
+  // --- 3. PASSWORD BREACH CHECK (HIBP API) ---
+  const checkPasswordBreach = useCallback(async (password: string) => {
+    if (!password || password.length < 4) {
+      setPwnedWarning(null);
+      return;
+    }
+
+    setIsCheckingPwned(true);
+    try {
+      // 1. Hash password with SHA-1
+      const encoder = new TextEncoder();
+      const data = encoder.encode(password);
+      const hashBuffer = await crypto.subtle.digest('SHA-1', data);
+      const hashArray = Array.from(new Uint8Array(hashBuffer));
+      const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase();
+
+      // 2. Send only first 5 chars to API (k-anonymity)
+      const prefix = hashHex.substring(0, 5);
+      const suffix = hashHex.substring(5);
+
+      const response = await fetch(`https://api.pwnedpasswords.com/range/${prefix}`);
+      const text = await response.text();
+
+      // 3. Check if suffix exists in response
+      const lines = text.split('\n');
+      const match = lines.find(line => line.startsWith(suffix));
+
+      if (match) {
+        const count = match.split(':')[1];
+        setPwnedWarning(`WARNING: This password appears in ${parseInt(count).toLocaleString()} known data breaches!`);
+      } else {
+        setPwnedWarning(null); // Safe
+      }
+    } catch (err) {
+      console.error("Failed to check password health", err);
+    } finally {
+      setIsCheckingPwned(false);
+    }
+  }, []);
+
+  // Debounce the password check so it doesn't fire on every keystroke
+  useEffect(() => {
+    const delayDebounceFn = setTimeout(() => {
+      if (isAdding && addType === 'password') {
+        checkPasswordBreach(form.password);
+      }
+    }, 500); // 500ms delay
+
+    return () => clearTimeout(delayDebounceFn);
+  }, [form.password, isAdding, addType, checkPasswordBreach]);
+
 
   const loadItems = async () => {
     if (!masterKey) return;
@@ -191,6 +231,7 @@ export default function VaultDashboard() {
     setEditingId(null);
     setForm({ name: '', url: '', username: '', password: '', description: '' });
     setShowSecret(false);
+    setPwnedWarning(null);
   };
 
   const startAdd = (type: 'password' | 'apikey') => {
@@ -316,7 +357,7 @@ export default function VaultDashboard() {
                             <div className="relative flex-1">
                                <input 
                                  type={showSecret ? "text" : "password"}
-                                 className="w-full p-2.5 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-gray-900 focus:border-transparent outline-none transition-all" 
+                                 className={`w-full p-2.5 border rounded-lg text-sm font-mono focus:ring-2 focus:border-transparent outline-none transition-all ${pwnedWarning ? 'border-red-300 ring-red-100' : 'border-gray-300 focus:ring-gray-900'}`}
                                  value={form.password} 
                                  onChange={e => setForm({...form, password: e.target.value})} 
                                />
@@ -328,6 +369,19 @@ export default function VaultDashboard() {
                                Generate
                             </button>
                          </div>
+
+                         {/* PWNED WARNING SECTION */}
+                         {isCheckingPwned && <p className="text-xs text-gray-400 mt-1 flex items-center gap-1"><Loader2 size={10} className="animate-spin"/> Checking security...</p>}
+                         
+                         {pwnedWarning && (
+                           <div className="mt-2 bg-red-50 text-red-700 text-xs p-3 rounded-lg flex items-start gap-2 border border-red-100 animate-in slide-in-from-top-1">
+                              <ShieldAlert size={16} className="shrink-0 mt-0.5"/>
+                              <div>
+                                <strong>Compromised Password Detected</strong>
+                                <p className="mt-0.5 opacity-90">{pwnedWarning}</p>
+                              </div>
+                           </div>
+                         )}
                     </div>
 
                     <div className="md:col-span-2 space-y-1">
