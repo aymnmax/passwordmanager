@@ -3,9 +3,10 @@ import { NextResponse } from 'next/server';
 
 export async function POST(req: Request) {
   try {
-    // 1. Check if Key exists
+    // 1. Check if Key exists in Environment
     if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
-      throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY in Environment Variables.");
+      console.error("CRITICAL ERROR: SUPABASE_SERVICE_ROLE_KEY is missing.");
+      return NextResponse.json({ success: false, error: "Server Error: Admin Key Missing" }, { status: 500 });
     }
 
     const supabaseAdmin = createClient(
@@ -15,23 +16,27 @@ export async function POST(req: Request) {
 
     const { email, deviceToken, token } = await req.json();
 
-    // 2. Safely Fetch Users
-    const { data: userList, error: listError } = await supabaseAdmin.auth.admin.listUsers();
+    // 2. Fetch Users (With Error Handling)
+    const { data: userResult, error: listError } = await supabaseAdmin.auth.admin.listUsers();
     
-    // --- FIX: Check for errors immediately ---
-    if (listError || !userList) {
+    // --- THIS IS THE FIX ---
+    // If the key is wrong, userResult will be null. We must check for that.
+    if (listError || !userResult || !userResult.users) {
       console.error("Supabase Admin Error:", listError);
-      return NextResponse.json({ success: false, error: "Database Connection Failed (Check Service Role Key)" }, { status: 500 });
+      return NextResponse.json({ 
+        success: false, 
+        error: "Database Connection Failed. Check Service Role Key." 
+      }, { status: 500 });
     }
 
-    // 3. Find User
-    const targetUser = userList.users.find((u: any) => u.email === email);
+    // 3. Find the User
+    const targetUser = userResult.users.find((u: any) => u.email === email);
     
     if (!targetUser) {
       return NextResponse.json({ success: false, error: 'User not found' });
     }
 
-    // 4. Insert Request
+    // 4. Create Recovery Request
     const { error: insertError } = await supabaseAdmin
       .from('recovery_requests')
       .insert({
@@ -45,7 +50,7 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ success: true });
   } catch (err: any) {
-    console.error("Recovery API Error:", err.message); 
+    console.error("Recovery API Crash:", err.message); 
     return NextResponse.json({ success: false, error: err.message }, { status: 500 });
   }
 }
