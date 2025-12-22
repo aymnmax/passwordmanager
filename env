@@ -3,7 +3,7 @@ NEXT_PUBLIC_SUPABASE_URL=https://usujvqrmtgugjhbtgdxm.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=sb_publishable_1qvo5yYs6vAGH5aMfkLzjg_FQ1rjbpP
 
 # 2. Admin Access (For Recovery)
-SUPABASE_SERVICE_ROLE_KEY=sb_publishable_1qvo5yYs6vAGH5aMfkLzjg_FQ1rjbpP
+SUPABASE_SERVICE_ROLE_KEY=sb_secret_mg5IuxtQmhrPFlSFjVOh4g_2ML1lxDO
 
 # 3. Email Sending (Gmail)
 GMAIL_USER=aliaymanwork@gmail.com
