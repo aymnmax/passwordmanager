@@ -1,22 +1,22 @@
 import { createClient } from '@supabase/supabase-js';
 import { NextResponse } from 'next/server';
 
-// Create a SUPABASE ADMIN Client (Service Role Key required for searching users)
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY! // You need to add this to .env.local
-);
-
 export async function POST(req: Request) {
   try {
+    // --- FIX: Initialize Supabase INSIDE the function ---
+    // This prevents the "supabaseKey is required" error during build time.
+    const supabaseAdmin = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY! 
+    );
+    // ----------------------------------------------------
+
     const { email, deviceToken, token } = await req.json();
 
     // 1. Find User ID
     const { data: users, error } = await supabaseAdmin.auth.admin.listUsers();
-    // Note: listUsers is paginated. For small apps, this finds them. 
-    // Ideally use: supabaseAdmin.rpc('get_user_id_by_email', {email}) if created.
     
-    // Simpler hack for this context:
+    // Find the user with this email
     const targetUser = users.users.find(u => u.email === email);
     
     if (!targetUser) return NextResponse.json({ success: false, error: 'User not found' });
@@ -35,6 +35,7 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ success: true });
   } catch (err: any) {
+    console.error("Recovery API Error:", err); // Helpful for debugging logs
     return NextResponse.json({ success: false, error: err.message }, { status: 500 });
   }
 }
