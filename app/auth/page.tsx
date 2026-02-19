@@ -3,21 +3,21 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
-import { deriveKey } from '@/lib/crypto';
+import { deriveKey, generateMEK, wrapMEK, unwrapMEK, generateEmergencyKey } from '@/lib/crypto';
 import { useAuth } from '@/context/AuthContext';
 import { toast } from 'sonner';
 import { UAParser } from 'ua-parser-js';
 import { authenticator } from 'otplib';
 import QRCode from 'qrcode';
 import { 
-  Loader2, Mail, Lock, ShieldCheck, HelpCircle, Smartphone, 
-  X, CheckCircle2, Server, Key, EyeOff, Code, AlertOctagon
+  Loader2, Mail, Lock, ShieldCheck, Smartphone, 
+  X, CheckCircle2, Server, Key, EyeOff, Code, AlertTriangle, FileText, Copy
 } from 'lucide-react';
 
 const SECURITY_IMAGES = [
   { id: 'elephant', label: 'Elephant', icon: '🐘' },
-  { id: 'cat', label: 'Cat', icon: '🐱' },
-  { id: 'dog', label: 'Dog', icon: '🐶' },
+  { id: 'cat', label: 'Cat', icon: '🐈' },
+  { id: 'dog', label: 'Dog', icon: '🐕' },
   { id: 'lion', label: 'Lion', icon: '🦁' },
   { id: 'panda', label: 'Panda', icon: '🐼' },
   { id: 'fox', label: 'Fox', icon: '🦊' },
@@ -37,38 +37,25 @@ export default function AuthPage() {
   const [regStep, setRegStep] = useState(1);
   const [qrImage, setQrImage] = useState('');
   const [generatedSecret, setGeneratedSecret] = useState('');
+  
+  // NEW: Emergency Kit State
+  const [emergencyKey, setEmergencyKey] = useState('');
+  const [savedKit, setSavedKit] = useState(false);
 
-  const [form, setForm] = useState({ 
-    email: '', password: '', securityQ: '', securityA: '', selectedImage: '' 
-  });
+  const [form, setForm] = useState({ email: '', password: '', selectedImage: '' });
 
   const { setMasterKey } = useAuth();
   const router = useRouter();
 
-  // --- HELPER: Lockout Check ---
   const handleLockout = async (errorMsg: string) => {
-    // 1. Increment Failure Count in DB
     await supabase.rpc('increment_failed_attempts', { email_input: form.email });
-    
-    // 2. Check if they just hit the limit (3)
     const { data: isLocked } = await supabase.rpc('check_is_locked', { email_input: form.email });
-    
     if (isLocked) {
       toast.error("ACCOUNT LOCKED due to too many failed attempts.", { duration: 6000 });
       throw new Error("Account Locked. You must reset your password to regain access.");
     } else {
       throw new Error(errorMsg);
     }
-  };
-
-  // --- HELPER: SHA-256 Hashing ---
-  const hashAnswer = async (text: string) => {
-    const encoder = new TextEncoder();
-    const data = encoder.encode(text.toLowerCase().trim());
-    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-    return Array.from(new Uint8Array(hashBuffer))
-      .map(b => b.toString(16).padStart(2, '0'))
-      .join('');
   };
 
   const getDeviceIdentifier = () => {
@@ -103,42 +90,62 @@ export default function AuthPage() {
       const isValid = authenticator.check(authCode, generatedSecret);
       if (!isValid) throw new Error("Invalid Code. Please scan the QR again.");
 
-      const answerHash = await hashAnswer(form.securityA);
-      const { error } = await supabase.auth.signUp({ 
+      // 1. Create the Auth User (No security questions anymore!)
+      const { data: authData, error: authError } = await supabase.auth.signUp({ 
         email: form.email, password: form.password,
-        options: { data: { security_question: form.securityQ, security_answer_hash: answerHash, selected_animal: form.selectedImage, totp_secret: generatedSecret } }
+        options: { data: { selected_animal: form.selectedImage, totp_secret: generatedSecret } }
       });
+      if (authError || !authData.user) throw authError || new Error("Signup failed.");
 
-      if (error) throw error;
-      toast.success('Account created! Please check your email to confirm.');
-      setIsLogin(true);
-      setRegStep(1);
-      setForm({ email: '', password: '', securityQ: '', securityA: '', selectedImage: '' });
+      const userId = authData.user.id;
+
+      // 2. ZERO-KNOWLEDGE CRYPTO ENGINE
+      const eKey = generateEmergencyKey();
+      const mek = await generateMEK(); // The golden vault key
+      
+      const masterWrappingKey = await deriveKey(form.password, userId); // Key A
+      const emergencyWrappingKey = await deriveKey(eKey, userId);       // Key B
+
+      // 3. Create the "Locked Boxes"
+      const { encryptedKey: encMekMaster, iv: ivMaster } = await wrapMEK(mek, masterWrappingKey);
+      const { encryptedKey: encMekRecovery, iv: ivRecovery } = await wrapMEK(mek, emergencyWrappingKey);
+
+      // 4. Save Locked Boxes to Database
+      const { error: dbError } = await supabase.from('user_profiles').update({ 
+        encrypted_mek: encMekMaster, 
+        mek_iv: ivMaster, 
+        encrypted_mek_recovery: encMekRecovery, 
+        recovery_mek_iv: ivRecovery 
+      }).eq('id', userId);
+
+      if (dbError) throw new Error("Failed to save encryption keys.");
+
+      setEmergencyKey(eKey);
+      setRegStep(3); // Move to Emergency Kit screen
+
     } catch (err: any) { toast.error(err.message); } 
     finally { setLoading(false); }
+  };
+
+  const finishRegistration = () => {
+    toast.success('Account secured! Please log in.');
+    setIsLogin(true);
+    setRegStep(1);
+    setForm({ email: '', password: '', selectedImage: '' });
+    setEmergencyKey('');
+    setSavedKit(false);
   };
 
   // ================= LOGIN FLOW =================
   const handleLoginInit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
-
     try {
-      // 1. CHECK LOCK STATUS FIRST
       const { data: isLocked } = await supabase.rpc('check_is_locked', { email_input: form.email });
-      if (isLocked) {
-        throw new Error("Account Locked. Please use 'Forgot Password' to reset and unlock.");
-      }
+      if (isLocked) throw new Error("Account Locked. Please use 'Forgot Password'.");
 
-      const { error } = await supabase.auth.signInWithPassword({ 
-        email: form.email, password: form.password 
-      });
-      
-      if (error) {
-         // FAILED PASSWORD -> Increment Counter
-         await handleLockout("Invalid email or password."); 
-         return; 
-      }
+      const { error } = await supabase.auth.signInWithPassword({ email: form.email, password: form.password });
+      if (error) { await handleLockout("Invalid email or password."); return; }
 
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("Session Error");
@@ -154,11 +161,8 @@ export default function AuthPage() {
 
       if (trusted) { setIsNewDeviceFlow(false); setLoginStep(3); } 
       else { setIsNewDeviceFlow(true); setLoginStep(2); }
-    } catch (err: any) {
-      toast.error(err.message);
-    } finally {
-      setLoading(false);
-    }
+    } catch (err: any) { toast.error(err.message); } 
+    finally { setLoading(false); }
   };
 
   const handleAuthVerify = async (e: React.FormEvent) => {
@@ -169,21 +173,14 @@ export default function AuthPage() {
       const { data: profile } = await supabase.from('user_profiles').select('totp_secret').eq('id', user?.id).single(); 
       if (!profile?.totp_secret) throw new Error("Security setup missing.");
 
-      const isValid = authenticator.check(authCode, profile.totp_secret);
-      
-      if (!isValid) {
-        // FAILED TOTP -> Increment Counter
+      if (!authenticator.check(authCode, profile.totp_secret)) {
         await handleLockout("Invalid Authenticator Code.");
         return;
       }
-
       toast.success("Identity Verified.");
       setLoginStep(3);
-    } catch (err: any) {
-      toast.error(err.message);
-    } finally {
-      setLoading(false);
-    }
+    } catch (err: any) { toast.error(err.message); } 
+    finally { setLoading(false); }
   };
 
   const handleLoginImage = async (imageId: string) => {
@@ -195,7 +192,6 @@ export default function AuthPage() {
       if (!profile || profile.selected_animal !== imageId) {
         await supabase.auth.signOut();
         setLoginStep(1);
-        // FAILED IMAGE -> Increment Counter
         await handleLockout("Wrong Security Image! Login aborted.");
         return;
       }
@@ -206,65 +202,56 @@ export default function AuthPage() {
       if (isNewDeviceFlow) {
         await supabase.from('trusted_devices').insert({ user_id: user?.id, device_id: deviceToken, device_name: deviceName });
       }
-
       await completeLogin(user, deviceName);
-    } catch (err: any) {
-      toast.error(err.message);
-    } finally {
-      setLoading(false);
-    }
+    } catch (err: any) { toast.error(err.message); } 
+    finally { setLoading(false); }
   };
 
   const completeLogin = async (user: any, deviceName: string) => {
     try {
-      const key = await deriveKey(form.password, user?.id!);
-      const exported = await window.crypto.subtle.exportKey('jwk', key);
-      sessionStorage.setItem('secure_vault_key', JSON.stringify(exported));
-      setMasterKey(key);
-      await supabase.from('login_sessions').insert({ user_id: user?.id, device_name: deviceName });
+      // 1. Fetch the Locked Box from Database
+      const { data: profile } = await supabase.from('user_profiles').select('encrypted_mek, mek_iv').eq('id', user.id).single();
+      if (!profile?.encrypted_mek) throw new Error("Vault architecture missing. Account may need resetting.");
+
+      // 2. Re-derive the Master Wrapping Key from Password
+      const masterWrappingKey = await deriveKey(form.password, user.id);
       
-      // SUCCESS! Reset failed attempts to 0 just in case they had 1 or 2
+      // 3. UNWRAP the Master Encryption Key!
+      const mek = await unwrapMEK(profile.encrypted_mek, profile.mek_iv, masterWrappingKey);
+      
+      // 4. Store securely in session
+      const exported = await window.crypto.subtle.exportKey('jwk', mek);
+      sessionStorage.setItem('secure_vault_key', JSON.stringify(exported));
+      setMasterKey(mek);
+      
+      await supabase.from('login_sessions').insert({ user_id: user.id, device_name: deviceName });
       await supabase.rpc('unlock_account_by_email', { email_input: form.email });
 
       router.push('/vault');
     } catch (e) {
       console.error(e);
-      toast.error("Encryption failed. Please try again.");
+      toast.error("Decryption failed. Invalid Master Password.");
+      await supabase.auth.signOut();
+      setLoginStep(1);
     }
   };
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-slate-50 p-4 font-sans text-slate-900 relative">
-      
-      {showSecurityInfo && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-in fade-in">
-           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden">
-              <div className="bg-slate-900 p-4 flex justify-between items-center text-white">
-                 <h3 className="font-bold flex items-center gap-2"><ShieldCheck size={20}/> Security Architecture</h3>
-                 <button onClick={()=>setShowSecurityInfo(false)} className="hover:bg-slate-700 p-1 rounded"><X size={20}/></button>
-              </div>
-              <div className="p-6 space-y-6">
-                 <div className="flex gap-4"><div className="bg-blue-100 p-3 rounded-lg h-fit text-blue-600"><EyeOff size={24}/></div><div><h4 className="font-bold text-slate-900">Zero-Knowledge Proof</h4><p className="text-sm text-slate-500">Your data is encrypted <strong>on your device</strong>. We never see it.</p></div></div>
-                 <div className="flex gap-4"><div className="bg-green-100 p-3 rounded-lg h-fit text-green-600"><Key size={24}/></div><div><h4 className="font-bold text-slate-900">Military-Grade Encryption</h4><p className="text-sm text-slate-500">AES-256 GCM encryption and PBKDF2-SHA256 key derivation.</p></div></div>
-                 <div className="flex gap-4"><div className="bg-purple-100 p-3 rounded-lg h-fit text-purple-600"><Server size={24}/></div><div><h4 className="font-bold text-slate-900">Blind Storage</h4><p className="text-sm text-slate-500">We store only encrypted random noise.</p></div></div>
-                 <button onClick={()=>setShowSecurityInfo(false)} className="w-full bg-slate-900 text-white font-bold py-3 rounded-lg hover:bg-slate-800">Understood</button>
-              </div>
-           </div>
-        </div>
-      )}
-
       <div className="bg-white w-full max-w-4xl rounded-2xl shadow-xl overflow-hidden flex flex-col md:flex-row border border-slate-100">
+        
+        {/* LEFT BRANDING PANEL */}
         <div className="md:w-5/12 bg-slate-900 p-8 text-white flex flex-col justify-center relative overflow-hidden">
            <ShieldCheck className="w-12 h-12 text-blue-400 mb-6" />
            <h1 className="text-3xl font-bold mb-4">AymnSecureVault</h1>
            <div className="space-y-4 text-slate-300 text-sm leading-relaxed z-10 relative">
-             <p className="flex items-start gap-2"><CheckCircle2 size={16} className="text-blue-400 mt-1"/> Built with zero-knowledge encryption.</p>
-             <p className="flex items-start gap-2"><CheckCircle2 size={16} className="text-blue-400 mt-1"/> Your passwords are encrypted before they reach us.</p>
-             <p className="flex items-start gap-2"><CheckCircle2 size={16} className="text-blue-400 mt-1"/> Even we can’t read them.</p>
+             <p className="flex items-start gap-2"><CheckCircle2 size={16} className="text-blue-400 mt-1"/> Zero-Knowledge Architecture</p>
+             <p className="flex items-start gap-2"><CheckCircle2 size={16} className="text-blue-400 mt-1"/> Cryptographic Key Wrapping</p>
+             <p className="flex items-start gap-2"><CheckCircle2 size={16} className="text-blue-400 mt-1"/> Absolute Privacy Guaranteed</p>
            </div>
-           <div className="absolute top-0 right-0 w-64 h-64 bg-blue-600 rounded-full blur-3xl opacity-20 transform translate-x-1/2 -translate-y-1/2" />
         </div>
 
+        {/* RIGHT FORM PANEL */}
         <div className="md:w-7/12 p-10 flex flex-col justify-center">
           {isLogin ? (
             <>
@@ -272,9 +259,9 @@ export default function AuthPage() {
                 <form onSubmit={handleLoginInit} className="space-y-4">
                    <h2 className="text-2xl font-bold">Sign In</h2>
                    <div className="relative"><Mail className="absolute left-3 top-3 text-gray-400 w-5 h-5"/><input type="email" required placeholder="Email" className="w-full pl-10 p-3 rounded border" value={form.email} onChange={e=>setForm({...form, email: e.target.value})} /></div>
-                   <div className="relative"><Lock className="absolute left-3 top-3 text-gray-400 w-5 h-5"/><input type="password" required placeholder="Password" className="w-full pl-10 p-3 rounded border" value={form.password} onChange={e=>setForm({...form, password: e.target.value})} /></div>
+                   <div className="relative"><Lock className="absolute left-3 top-3 text-gray-400 w-5 h-5"/><input type="password" required placeholder="Master Password" className="w-full pl-10 p-3 rounded border" value={form.password} onChange={e=>setForm({...form, password: e.target.value})} /></div>
                    <button disabled={loading} className="w-full bg-blue-600 text-white p-3 rounded font-bold hover:bg-blue-700">{loading ? <Loader2 className="animate-spin mx-auto" /> : 'Next'}</button>
-                   <p className="text-center text-sm text-blue-600 cursor-pointer hover:underline" onClick={()=>router.push('/auth/forgot')}>Forgot Password?</p>
+                   <p className="text-center text-sm text-blue-600 cursor-pointer hover:underline" onClick={()=>router.push('/auth/forgot')}>Account Recovery</p>
                 </form>
               )}
               {loginStep === 2 && (
@@ -289,7 +276,7 @@ export default function AuthPage() {
               {loginStep === 3 && (
                  <div className="text-center animate-in zoom-in">
                     <h2 className="text-xl font-bold mb-4">Security Image</h2>
-                    <p className="text-sm text-gray-500 mb-4">Click your security image.</p>
+                    <p className="text-sm text-gray-500 mb-4">Click your security image to decrypt vault.</p>
                     <div className="grid grid-cols-3 gap-3 mb-4">
                       {SECURITY_IMAGES.map(img => (
                         <button key={img.id} onClick={()=>handleLoginImage(img.id)} disabled={loading} className="p-4 border rounded hover:bg-blue-50 text-3xl transition transform hover:scale-105">{img.icon}</button>
@@ -301,32 +288,56 @@ export default function AuthPage() {
             </>
           ) : (
             <>
-              {regStep === 1 ? (
+              {regStep === 1 && (
                 <form onSubmit={handleRegInit} className="space-y-4">
-                   <h2 className="text-2xl font-bold">Create Account</h2>
-                   <div className="grid grid-cols-2 gap-2"><input type="email" required placeholder="Email" className="w-full p-2 border rounded" value={form.email} onChange={e=>setForm({...form, email: e.target.value})} /><input type="password" required placeholder="Master Password" className="w-full p-2 border rounded" value={form.password} onChange={e=>setForm({...form, password: e.target.value})} /></div>
-                   <div className="bg-gray-50 p-3 rounded border"><div className="flex items-center gap-2 mb-2 text-sm font-bold text-gray-700"><HelpCircle size={14} /> Security Question</div><select className="w-full p-2 border rounded mb-2 text-sm" value={form.securityQ} onChange={e=>setForm({...form, securityQ: e.target.value})} required><option value="">Select Question...</option><option value="pet">First Pet Name?</option><option value="city">Birth City?</option></select><input type="text" required placeholder="Answer" className="w-full p-2 border rounded text-sm" value={form.securityA} onChange={e=>setForm({...form, securityA: e.target.value})} /></div>
-                   <div><label className="text-sm font-bold block mb-2">Select Security Image</label><div className="flex justify-between">{SECURITY_IMAGES.map(img => (<button type="button" key={img.id} onClick={()=>setForm({...form, selectedImage: img.id})} className={`text-xl p-2 border rounded ${form.selectedImage === img.id ? 'bg-blue-600 text-white scale-110 shadow-lg' : 'bg-white'}`}>{img.icon}</button>))}</div></div>
+                   <h2 className="text-2xl font-bold">Create Vault</h2>
+                   <p className="text-sm text-gray-500 pb-2">Your Master Password is the ONLY key. Do not forget it.</p>
+                   <input type="email" required placeholder="Email Address" className="w-full p-3 border rounded" value={form.email} onChange={e=>setForm({...form, email: e.target.value})} />
+                   <input type="password" required placeholder="Master Password" className="w-full p-3 border rounded" value={form.password} onChange={e=>setForm({...form, password: e.target.value})} />
+                   <div><label className="text-sm font-bold block mb-2 text-gray-600">Select Anti-Phishing Image</label><div className="flex justify-between">{SECURITY_IMAGES.map(img => (<button type="button" key={img.id} onClick={()=>setForm({...form, selectedImage: img.id})} className={`text-xl p-2 border rounded ${form.selectedImage === img.id ? 'bg-blue-600 text-white scale-110 shadow-lg' : 'bg-white hover:bg-gray-50'}`}>{img.icon}</button>))}</div></div>
                    <button disabled={loading} className="w-full bg-slate-900 text-white p-3 rounded font-bold hover:bg-slate-800">{loading ? <Loader2 className="animate-spin mx-auto" /> : 'Next Step'}</button>
                 </form>
-              ) : (
+              )}
+              {regStep === 2 && (
                 <form onSubmit={handleRegFinal} className="space-y-4 text-center animate-in slide-in-from-right">
                    <div className="mx-auto bg-white p-4 border-2 border-black rounded-lg inline-block">{qrImage && <img src={qrImage} alt="Scan QR" className="w-48 h-48" />}</div>
                    <h2 className="text-xl font-bold">Setup Authenticator</h2>
                    <p className="text-sm text-gray-600">Scan with Google Authenticator.</p>
                    <input className="w-full text-center text-3xl tracking-widest p-3 border rounded font-mono mt-4" placeholder="000 000" maxLength={6} value={authCode} onChange={e=>setAuthCode(e.target.value)} required />
-                   <button disabled={loading} className="w-full bg-green-600 text-white p-3 rounded font-bold hover:bg-green-700 mt-2">{loading ? <Loader2 className="animate-spin mx-auto" /> : 'Confirm & Create Account'}</button>
-                   <button type="button" onClick={()=>setRegStep(1)} className="text-sm underline mt-2">Back</button>
+                   <button disabled={loading} className="w-full bg-green-600 text-white p-3 rounded font-bold hover:bg-green-700 mt-2">{loading ? <Loader2 className="animate-spin mx-auto" /> : 'Generate Encryption Keys'}</button>
                 </form>
+              )}
+              {regStep === 3 && (
+                <div className="space-y-5 animate-in slide-in-from-bottom">
+                   <div className="text-center">
+                     <AlertTriangle className="w-12 h-12 text-red-500 mx-auto mb-2" />
+                     <h2 className="text-2xl font-black text-red-600">Emergency Recovery Kit</h2>
+                     <p className="text-sm text-gray-600 mt-2">If you forget your Master Password, this is the <strong>ONLY</strong> way to recover your data. We cannot reset it for you.</p>
+                   </div>
+                   
+                   <div className="bg-slate-50 border-2 border-dashed border-slate-300 p-6 rounded-xl text-center relative group">
+                     <p className="font-mono text-xl font-bold text-slate-900 tracking-wider break-all">{emergencyKey}</p>
+                     <button onClick={() => { navigator.clipboard.writeText(emergencyKey); toast.success("Copied to clipboard!"); }} className="absolute top-2 right-2 p-2 text-slate-400 hover:text-blue-600"><Copy size={18}/></button>
+                   </div>
+
+                   <label className="flex items-start gap-3 p-4 bg-red-50 rounded-lg cursor-pointer border border-red-100">
+                     <input type="checkbox" className="mt-1 w-5 h-5 accent-red-600" checked={savedKit} onChange={(e) => setSavedKit(e.target.checked)} />
+                     <span className="text-sm font-medium text-red-900">I have written down or saved my Emergency Key in a secure location. I understand that if I lose this, my data is permanently gone.</span>
+                   </label>
+
+                   <button disabled={!savedKit} onClick={finishRegistration} className={`w-full p-3 rounded font-bold text-white transition-all ${savedKit ? 'bg-slate-900 hover:bg-black shadow-lg' : 'bg-slate-300 cursor-not-allowed'}`}>
+                      Complete Setup & Log In
+                   </button>
+                </div>
               )}
             </>
           )}
 
-          <div className="mt-6 text-center border-t pt-4 space-y-3">
-             <button onClick={()=>{setIsLogin(!isLogin); setLoginStep(1); setRegStep(1)}} className="text-blue-600 font-medium block w-full">{isLogin ? "Need an account? Register" : "Have an account? Sign In"}</button>
-             <button onClick={()=>setShowSecurityInfo(true)} className="text-xs text-slate-400 hover:text-slate-600 flex items-center justify-center gap-1 mx-auto transition-colors"><Lock size={12}/> How is my data secured?</button>
-             <div className="pt-4 border-t border-slate-50"><p className="text-[10px] text-slate-400 font-medium flex items-center justify-center gap-1">Created by <span className="text-slate-600 font-bold flex items-center gap-0.5"><Code size={10}/> aymanxsec</span></p><a href="mailto:aliaymanwork@gmail.com" className="text-[10px] text-blue-400 hover:text-blue-600 transition-colors mt-1 block">aliaymanwork@gmail.com</a></div>
-          </div>
+          {regStep !== 3 && (
+            <div className="mt-6 text-center border-t pt-4">
+              <button onClick={()=>{setIsLogin(!isLogin); setLoginStep(1); setRegStep(1)}} className="text-blue-600 font-medium block w-full">{isLogin ? "Need an account? Register" : "Have an account? Sign In"}</button>
+            </div>
+          )}
         </div>
       </div>
     </div>
