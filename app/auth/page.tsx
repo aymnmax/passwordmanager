@@ -110,15 +110,19 @@ export default function AuthPage() {
       const { encryptedKey: encMekMaster, iv: ivMaster } = await wrapMEK(mek, masterWrappingKey);
       const { encryptedKey: encMekRecovery, iv: ivRecovery } = await wrapMEK(mek, emergencyWrappingKey);
 
-      // 4. Save Locked Boxes to Database
-      const { error: dbError } = await supabase.from('user_profiles').update({ 
-        encrypted_mek: encMekMaster, 
-        mek_iv: ivMaster, 
-        encrypted_mek_recovery: encMekRecovery, 
-        recovery_mek_iv: ivRecovery 
-      }).eq('id', userId);
+      // 4. Save Locked Boxes to Database using our Secure RPC Function
+      const { error: dbError } = await supabase.rpc('save_initial_keys', {
+        target_user_id: userId,
+        new_enc_mek: encMekMaster,
+        new_mek_iv: ivMaster,
+        new_enc_mek_rec: encMekRecovery,
+        new_rec_mek_iv: ivRecovery
+      });
 
-      if (dbError) throw new Error("Failed to save encryption keys.");
+      if (dbError) {
+        console.error("RPC Error:", dbError);
+        throw new Error("Failed to save encryption keys.");
+      }
 
       setEmergencyKey(eKey);
       setRegStep(3); // Move to Emergency Kit screen
@@ -128,7 +132,7 @@ export default function AuthPage() {
   };
 
   const finishRegistration = () => {
-    toast.success('Account secured! Please log in.');
+    toast.success('Account secured! Please check your email to verify your account, then log in.');
     setIsLogin(true);
     setRegStep(1);
     setForm({ email: '', password: '', selectedImage: '' });
@@ -279,10 +283,10 @@ export default function AuthPage() {
                     <p className="text-sm text-gray-500 mb-4">Click your security image to decrypt vault.</p>
                     <div className="grid grid-cols-3 gap-3 mb-4">
                       {SECURITY_IMAGES.map(img => (
-                        <button key={img.id} onClick={()=>handleLoginImage(img.id)} disabled={loading} className="p-4 border rounded hover:bg-blue-50 text-3xl transition transform hover:scale-105">{img.icon}</button>
+                        <button key={img.id} type="button" onClick={()=>handleLoginImage(img.id)} disabled={loading} className="p-4 border rounded hover:bg-blue-50 text-3xl transition transform hover:scale-105">{img.icon}</button>
                       ))}
                     </div>
-                    <button onClick={()=>setLoginStep(1)} className="text-sm underline text-gray-500">Cancel</button>
+                    <button type="button" onClick={()=>setLoginStep(1)} className="text-sm underline text-gray-500">Cancel</button>
                  </div>
               )}
             </>
