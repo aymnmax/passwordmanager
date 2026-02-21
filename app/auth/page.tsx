@@ -54,10 +54,11 @@ export default function AuthPage() {
   const { setMasterKey } = useAuth();
   const router = useRouter();
 
-  // --- HANDLES EMAIL VERIFICATION REDIRECT ---
+  // --- HANDLES EMAIL VERIFICATION REDIRECT ONLY ---
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
       const hasEmailToken = window.location.hash.includes('access_token');
+
       if (event === 'SIGNED_IN' && hasEmailToken) {
         toast.success("Email verified! Please sign in with your Master Password.");
         setIsLogin(true);
@@ -65,10 +66,12 @@ export default function AuthPage() {
         setRegStep(1);
         window.history.replaceState(null, '', window.location.pathname);
       }
+      
       if (event === 'USER_UPDATED') {
         toast.info("Account updated.");
       }
     });
+
     return () => subscription.unsubscribe();
   }, []);
 
@@ -92,7 +95,6 @@ export default function AuthPage() {
       const result = zxcvbn(val);
       setPasswordScore(result.score);
       
-      // SOC ANALYST LOGIC: If score is 4 and length is 12+, show success.
       if (result.score === 4 && val.length >= 12) {
         setPasswordFeedback("Strong Password!");
       } else {
@@ -152,8 +154,10 @@ export default function AuthPage() {
       });
 
       if (dbError) throw new Error("Failed to save encryption keys.");
+
       setEmergencyKey(eKey);
       setRegStep(3); 
+
     } catch (err: any) { toast.error(err.message); } 
     finally { setLoading(false); }
   };
@@ -177,23 +181,30 @@ export default function AuthPage() {
       if (statusData && statusData.length > 0) {
         const { status, lock_time } = statusData[0];
         if (status === 'perm_locked') throw new Error("Account permanently locked.");
-        if (status === 'temp_locked') throw new Error(`Try again later.`);
+        if (status === 'temp_locked') throw new Error(`Too many attempts. Try later.`);
       }
+
       const { error } = await supabase.auth.signInWithPassword({ email: form.email, password: form.password });
       if (error) { 
         await supabase.rpc('handle_failed_attempt', { email_input: form.email });
-        throw new Error("Invalid credentials.");
+        throw new Error("Invalid email or Master Password.");
       }
+
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("Session Error");
+
       const uniqueDeviceToken = getDeviceIdentifier();
       const parser = new UAParser();
       const deviceName = `${parser.getBrowser().name} on ${parser.getOS().name}`;
+      
       sessionStorage.setItem('temp_device_token', uniqueDeviceToken || '');
       sessionStorage.setItem('temp_device_name', deviceName);
+
       const { data: trusted } = await supabase.from('trusted_devices').select('*').eq('user_id', user.id).eq('device_id', uniqueDeviceToken).maybeSingle();
+
       if (trusted) { setIsNewDeviceFlow(false); setLoginStep(3); } 
       else { setIsNewDeviceFlow(true); setLoginStep(2); }
+      
     } catch (err: any) { toast.error(err.message); } 
     finally { setLoading(false); }
   };
@@ -204,8 +215,12 @@ export default function AuthPage() {
     try {
       const { data: { user } } = await supabase.auth.getUser();
       const { data: profile } = await supabase.from('user_profiles').select('totp_secret').eq('id', user?.id).single(); 
-      if (!profile?.totp_secret) throw new Error("Setup missing.");
-      if (!authenticator.check(authCode, profile.totp_secret)) throw new Error("Invalid Code.");
+      if (!profile?.totp_secret) throw new Error("Security setup missing.");
+
+      if (!authenticator.check(authCode, profile.totp_secret)) {
+        await supabase.rpc('handle_failed_attempt', { email_input: form.email });
+        throw new Error("Invalid Authenticator Code.");
+      }
       setLoginStep(3);
     } catch (err: any) { toast.error(err.message); } 
     finally { setLoading(false); }
@@ -216,9 +231,17 @@ export default function AuthPage() {
     try {
       const { data: { user } } = await supabase.auth.getUser();
       const { data: profile } = await supabase.from('user_profiles').select('selected_animal').eq('id', user?.id).single();
-      if (!profile || profile.selected_animal !== imageId) throw new Error("Wrong Image!");
+      
+      if (!profile || profile.selected_animal !== imageId) {
+        await supabase.rpc('handle_failed_attempt', { email_input: form.email });
+        await supabase.auth.signOut();
+        setLoginStep(1);
+        throw new Error("Wrong Security Image!");
+      }
+
       const deviceToken = sessionStorage.getItem('temp_device_token')!;
       const deviceName = sessionStorage.getItem('temp_device_name')!;
+
       if (isNewDeviceFlow) {
         await supabase.from('trusted_devices').insert({ user_id: user?.id, device_id: deviceToken, device_name: deviceName });
       }
@@ -229,16 +252,28 @@ export default function AuthPage() {
 
   const completeLogin = async (user: any, deviceName: string) => {
     try {
-      const { data: profile } = await supabase.from('user_profiles').select('encrypted_mek, mek_iv').eq('id', user.id).single();
+      const { data: profile, error } = await supabase.from('user_profiles').select('encrypted_mek, mek_iv').eq('id', user.id).single();
+      
+      if (error || !profile) {
+        throw new Error("Vault profile not found.");
+      }
+
       const masterWrappingKey = await deriveKey(form.password, user.id);
       const mek = await unwrapMEK(profile.encrypted_mek, profile.mek_iv, masterWrappingKey);
+      
       const exported = await window.crypto.subtle.exportKey('jwk', mek);
       sessionStorage.setItem('secure_vault_key', JSON.stringify(exported));
       setMasterKey(mek);
+      
       await supabase.from('login_sessions').insert({ user_id: user.id, device_name: deviceName });
       await supabase.rpc('unlock_account_by_email', { email_input: form.email });
+
       router.push('/vault');
-    } catch (e) { toast.error("Decryption failed."); }
+    } catch (e: any) {
+      await supabase.auth.signOut();
+      setLoginStep(1);
+      toast.error(e.message || "Decryption failed.");
+    }
   };
 
   return (
@@ -263,14 +298,11 @@ export default function AuthPage() {
               {loginStep === 1 && (
                 <form onSubmit={handleLoginInit} className="space-y-4">
                    <h2 className="text-2xl font-bold">Sign In</h2>
-                   <div className="relative">
-                     <Mail className="absolute left-3 top-3 text-gray-400 w-5 h-5"/>
-                     <input type="email" required placeholder="Email" className="w-full pl-10 p-3 rounded border" value={form.email} onChange={e=>setForm({...form, email: e.target.value})} />
-                   </div>
+                   <div className="relative"><Mail className="absolute left-3 top-3 text-gray-400 w-5 h-5"/><input type="email" required placeholder="Email" className="w-full pl-10 p-3 rounded border" value={form.email} onChange={e=>setForm({...form, email: e.target.value})} /></div>
                    <div className="relative">
                      <Lock className="absolute left-3 top-3 text-gray-400 w-5 h-5"/>
                      <input type={showPassword ? "text" : "password"} required placeholder="Master Password" className="w-full pl-10 pr-10 p-3 rounded border" value={form.password} onChange={e=>setForm({...form, password: e.target.value})} />
-                     <button type="button" onClick={() => setShowPassword(!showPassword)} className="absolute right-3 top-3 text-gray-400 hover:text-slate-600">
+                     <button type="button" onClick={() => setShowPassword(!showPassword)} className="absolute right-3 top-3 text-gray-400">
                        {showPassword ? <EyeOff size={20}/> : <Eye size={20}/>}
                      </button>
                    </div>
@@ -301,12 +333,7 @@ export default function AuthPage() {
               {regStep === 1 && (
                 <form onSubmit={handleRegInit} className="space-y-4">
                    <h2 className="text-2xl font-bold">Create Vault</h2>
-                   <div className="relative">
-                     <Mail className="absolute left-3 top-3 text-gray-400 w-5 h-5"/>
-                     <input type="email" required placeholder="Email Address" className="w-full pl-10 p-3 border rounded" value={form.email} onChange={e=>setForm({...form, email: e.target.value})} />
-                   </div>
-                   
-                   {/* Master Password */}
+                   <div className="relative"><Mail className="absolute left-3 top-3 text-gray-400 w-5 h-5"/><input type="email" required placeholder="Email Address" className="w-full pl-10 p-3 border rounded" value={form.email} onChange={e=>setForm({...form, email: e.target.value})} /></div>
                    <div>
                      <div className="relative">
                        <Lock className="absolute left-3 top-3 text-gray-400 w-5 h-5"/>
@@ -328,8 +355,6 @@ export default function AuthPage() {
                         </div>
                      )}
                    </div>
-
-                   {/* Confirm Password */}
                    <div>
                      <div className="relative">
                        <ShieldCheck className="absolute left-3 top-3 text-gray-400 w-5 h-5"/>
@@ -339,12 +364,9 @@ export default function AuthPage() {
                        </button>
                      </div>
                      {confirmPassword && form.password !== confirmPassword && (
-                       <p className="text-xs text-red-600 mt-1 flex items-center gap-1">
-                         <AlertTriangle size={12}/> Passwords do not match
-                       </p>
+                       <p className="text-xs text-red-600 mt-1 flex items-center gap-1"><AlertTriangle size={12}/> Passwords do not match</p>
                      )}
                    </div>
-
                    <div className="space-y-2">
                      <p className="text-xs font-semibold text-gray-500 uppercase">Select Security Image</p>
                      <div className="flex justify-between bg-slate-50 p-2 rounded-lg border">
@@ -353,10 +375,7 @@ export default function AuthPage() {
                        ))}
                      </div>
                    </div>
-
-                   <button disabled={loading || passwordScore < 4 || form.password.length < 12 || form.password !== confirmPassword || !form.selectedImage} className="w-full bg-slate-900 text-white p-3 rounded font-bold disabled:bg-slate-300">
-                     Next
-                   </button>
+                   <button disabled={loading || passwordScore < 4 || form.password.length < 12 || form.password !== confirmPassword || !form.selectedImage} className="w-full bg-slate-900 text-white p-3 rounded font-bold disabled:bg-slate-300">Next</button>
                 </form>
               )}
               {regStep === 2 && (
