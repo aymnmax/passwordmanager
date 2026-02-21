@@ -12,7 +12,7 @@ import QRCode from 'qrcode';
 import zxcvbn from 'zxcvbn';
 import { 
   Loader2, Mail, Lock, ShieldCheck, Smartphone, 
-  CheckCircle2, Key, AlertTriangle, Copy
+  CheckCircle2, Key, AlertTriangle, Copy, Eye, EyeOff
 } from 'lucide-react';
 
 const SECURITY_IMAGES = [
@@ -27,6 +27,8 @@ const SECURITY_IMAGES = [
 export default function AuthPage() {
   const [isLogin, setIsLogin] = useState(true);
   const [loading, setLoading] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
 
   // LOGIN STATE
   const [loginStep, setLoginStep] = useState(1);
@@ -52,20 +54,16 @@ export default function AuthPage() {
   const { setMasterKey } = useAuth();
   const router = useRouter();
 
-  // --- HANDLES EMAIL VERIFICATION REDIRECT ONLY ---
+  // --- HANDLES EMAIL VERIFICATION REDIRECT ---
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-      // Check if URL hash contains the access token from the email link
       const hasEmailToken = window.location.hash.includes('access_token');
 
       if (event === 'SIGNED_IN' && hasEmailToken) {
         toast.success("Email verified! Please sign in with your Master Password.");
-        
         setIsLogin(true);
         setLoginStep(1);
         setRegStep(1);
-        
-        // Remove token from URL for security and to prevent repeat toasts
         window.history.replaceState(null, '', window.location.pathname);
       }
       
@@ -96,7 +94,7 @@ export default function AuthPage() {
     } else {
       const result = zxcvbn(val);
       setPasswordScore(result.score);
-      setPasswordFeedback(result.feedback.warning || "Keep typing...");
+      setPasswordFeedback(result.feedback.warning || result.feedback.suggestions[0] || "Keep typing...");
     }
   };
 
@@ -173,10 +171,8 @@ export default function AuthPage() {
   const handleLoginInit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
-    
     try {
       const { data: statusData } = await supabase.rpc('check_account_status', { email_input: form.email });
-      
       if (statusData && statusData.length > 0) {
         const { status, lock_time } = statusData[0];
         if (status === 'perm_locked') throw new Error("Account permanently locked. Use Recovery.");
@@ -185,29 +181,21 @@ export default function AuthPage() {
           throw new Error(`Too many attempts. Try again at ${unlockTime}.`);
         }
       }
-
       const { error } = await supabase.auth.signInWithPassword({ email: form.email, password: form.password });
-      
       if (error) { 
         await supabase.rpc('handle_failed_attempt', { email_input: form.email });
         throw new Error("Invalid email or Master Password.");
       }
-
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("Session Error");
-
       const uniqueDeviceToken = getDeviceIdentifier();
       const parser = new UAParser();
       const deviceName = `${parser.getBrowser().name} on ${parser.getOS().name}`;
-      
       sessionStorage.setItem('temp_device_token', uniqueDeviceToken || '');
       sessionStorage.setItem('temp_device_name', deviceName);
-
       const { data: trusted } = await supabase.from('trusted_devices').select('*').eq('user_id', user.id).eq('device_id', uniqueDeviceToken).maybeSingle();
-
       if (trusted) { setIsNewDeviceFlow(false); setLoginStep(3); } 
       else { setIsNewDeviceFlow(true); setLoginStep(2); }
-      
     } catch (err: any) { toast.error(err.message); } 
     finally { setLoading(false); }
   };
@@ -219,7 +207,6 @@ export default function AuthPage() {
       const { data: { user } } = await supabase.auth.getUser();
       const { data: profile } = await supabase.from('user_profiles').select('totp_secret').eq('id', user?.id).single(); 
       if (!profile?.totp_secret) throw new Error("Security setup missing.");
-
       if (!authenticator.check(authCode, profile.totp_secret)) {
         await supabase.rpc('handle_failed_attempt', { email_input: form.email });
         throw new Error("Invalid Authenticator Code.");
@@ -234,17 +221,14 @@ export default function AuthPage() {
     try {
       const { data: { user } } = await supabase.auth.getUser();
       const { data: profile } = await supabase.from('user_profiles').select('selected_animal').eq('id', user?.id).single();
-      
       if (!profile || profile.selected_animal !== imageId) {
         await supabase.rpc('handle_failed_attempt', { email_input: form.email });
         await supabase.auth.signOut();
         setLoginStep(1);
         throw new Error("Wrong Security Image! Login aborted.");
       }
-
       const deviceToken = sessionStorage.getItem('temp_device_token')!;
       const deviceName = sessionStorage.getItem('temp_device_name')!;
-
       if (isNewDeviceFlow) {
         await supabase.from('trusted_devices').insert({ user_id: user?.id, device_id: deviceToken, device_name: deviceName });
       }
@@ -257,27 +241,13 @@ export default function AuthPage() {
     try {
       const { data: profile } = await supabase.from('user_profiles').select('encrypted_mek, mek_iv').eq('id', user.id).single();
       if (!profile?.encrypted_mek) throw new Error("Vault architecture missing.");
-
       const masterWrappingKey = await deriveKey(form.password, user.id);
       const mek = await unwrapMEK(profile.encrypted_mek, profile.mek_iv, masterWrappingKey);
-      
       const exported = await window.crypto.subtle.exportKey('jwk', mek);
       sessionStorage.setItem('secure_vault_key', JSON.stringify(exported));
       setMasterKey(mek);
-      
       await supabase.from('login_sessions').insert({ user_id: user.id, device_name: deviceName });
       await supabase.rpc('unlock_account_by_email', { email_input: form.email });
-
-      if (isNewDeviceFlow) {
-        fetch('/api/send-alert', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            email: form.email, deviceName, userId: user.id, time: new Date().toLocaleString()
-          })
-        }).catch(err => console.error("Failed to send alert", err));
-      }
-
       router.push('/vault');
     } catch (e) {
       await supabase.rpc('handle_failed_attempt', { email_input: form.email });
@@ -309,8 +279,17 @@ export default function AuthPage() {
               {loginStep === 1 && (
                 <form onSubmit={handleLoginInit} className="space-y-4">
                    <h2 className="text-2xl font-bold">Sign In</h2>
-                   <div className="relative"><Mail className="absolute left-3 top-3 text-gray-400 w-5 h-5"/><input type="email" required placeholder="Email" className="w-full pl-10 p-3 rounded border" value={form.email} onChange={e=>setForm({...form, email: e.target.value})} /></div>
-                   <div className="relative"><Lock className="absolute left-3 top-3 text-gray-400 w-5 h-5"/><input type="password" required placeholder="Master Password" className="w-full pl-10 p-3 rounded border" value={form.password} onChange={e=>setForm({...form, password: e.target.value})} /></div>
+                   <div className="relative">
+                     <Mail className="absolute left-3 top-3 text-gray-400 w-5 h-5"/>
+                     <input type="email" required placeholder="Email" className="w-full pl-10 p-3 rounded border" value={form.email} onChange={e=>setForm({...form, email: e.target.value})} />
+                   </div>
+                   <div className="relative">
+                     <Lock className="absolute left-3 top-3 text-gray-400 w-5 h-5"/>
+                     <input type={showPassword ? "text" : "password"} required placeholder="Master Password" className="w-full pl-10 pr-10 p-3 rounded border" value={form.password} onChange={e=>setForm({...form, password: e.target.value})} />
+                     <button type="button" onClick={() => setShowPassword(!showPassword)} className="absolute right-3 top-3 text-gray-400 hover:text-slate-600">
+                       {showPassword ? <EyeOff size={20}/> : <Eye size={20}/>}
+                     </button>
+                   </div>
                    <button disabled={loading} className="w-full bg-blue-600 text-white p-3 rounded font-bold hover:bg-blue-700">{loading ? <Loader2 className="animate-spin mx-auto" /> : 'Next'}</button>
                    <p className="text-center text-sm text-blue-600 cursor-pointer hover:underline" onClick={()=>router.push('/auth/forgot')}>Account Recovery</p>
                 </form>
@@ -341,9 +320,20 @@ export default function AuthPage() {
               {regStep === 1 && (
                 <form onSubmit={handleRegInit} className="space-y-4">
                    <h2 className="text-2xl font-bold">Create Vault</h2>
-                   <input type="email" required placeholder="Email Address" className="w-full p-3 border rounded" value={form.email} onChange={e=>setForm({...form, email: e.target.value})} />
+                   <div className="relative">
+                     <Mail className="absolute left-3 top-3 text-gray-400 w-5 h-5"/>
+                     <input type="email" required placeholder="Email Address" className="w-full pl-10 p-3 border rounded" value={form.email} onChange={e=>setForm({...form, email: e.target.value})} />
+                   </div>
+                   
+                   {/* Master Password */}
                    <div>
-                     <input type="password" required placeholder="Master Password (12+ chars)" className="w-full p-3 border rounded" value={form.password} onChange={handlePasswordChange} />
+                     <div className="relative">
+                       <Lock className="absolute left-3 top-3 text-gray-400 w-5 h-5"/>
+                       <input type={showPassword ? "text" : "password"} required placeholder="Master Password (12+ chars)" className="w-full pl-10 pr-10 p-3 border rounded" value={form.password} onChange={handlePasswordChange} />
+                       <button type="button" onClick={() => setShowPassword(!showPassword)} className="absolute right-3 top-3 text-gray-400">
+                         {showPassword ? <EyeOff size={20}/> : <Eye size={20}/>}
+                       </button>
+                     </div>
                      {form.password.length > 0 && (
                         <div className="mt-2 space-y-1">
                           <div className="flex gap-1 h-1.5 w-full">
@@ -351,12 +341,41 @@ export default function AuthPage() {
                               <div key={index} className={`h-full flex-1 rounded-full ${passwordScore > index ? (passwordScore === 4 ? 'bg-green-500' : 'bg-yellow-400') : 'bg-gray-200'}`} />
                             ))}
                           </div>
+                          <p className={`text-xs font-medium ${passwordScore === 4 ? 'text-green-600' : 'text-yellow-600'}`}>
+                            {passwordFeedback}
+                          </p>
                         </div>
                      )}
                    </div>
-                   <input type="password" required placeholder="Confirm Master Password" className="w-full p-3 border rounded" value={confirmPassword} onChange={e=>setConfirmPassword(e.target.value)} />
-                   <div className="flex justify-between">{SECURITY_IMAGES.map(img => (<button type="button" key={img.id} onClick={()=>setForm({...form, selectedImage: img.id})} className={`text-xl p-2 border rounded ${form.selectedImage === img.id ? 'bg-blue-600 text-white' : 'bg-white'}`}>{img.icon}</button>))}</div>
-                   <button disabled={loading || passwordScore < 4 || form.password.length < 12 || form.password !== confirmPassword || !form.selectedImage} className="w-full bg-slate-900 text-white p-3 rounded font-bold disabled:bg-slate-300">Next</button>
+
+                   {/* Confirm Password */}
+                   <div>
+                     <div className="relative">
+                       <ShieldCheck className="absolute left-3 top-3 text-gray-400 w-5 h-5"/>
+                       <input type={showConfirmPassword ? "text" : "password"} required placeholder="Confirm Master Password" className={`w-full pl-10 pr-10 p-3 border rounded ${confirmPassword && form.password !== confirmPassword ? 'border-red-500 bg-red-50' : ''}`} value={confirmPassword} onChange={e=>setConfirmPassword(e.target.value)} />
+                       <button type="button" onClick={() => setShowConfirmPassword(!showConfirmPassword)} className="absolute right-3 top-3 text-gray-400">
+                         {showConfirmPassword ? <EyeOff size={20}/> : <Eye size={20}/>}
+                       </button>
+                     </div>
+                     {confirmPassword && form.password !== confirmPassword && (
+                       <p className="text-xs text-red-600 mt-1 flex items-center gap-1">
+                         <AlertTriangle size={12}/> Passwords do not match
+                       </p>
+                     )}
+                   </div>
+
+                   <div className="space-y-2">
+                     <p className="text-xs font-semibold text-gray-500 uppercase">Select Security Image</p>
+                     <div className="flex justify-between bg-slate-50 p-2 rounded-lg border">
+                       {SECURITY_IMAGES.map(img => (
+                         <button type="button" key={img.id} onClick={()=>setForm({...form, selectedImage: img.id})} className={`text-xl p-2 rounded-md transition-all ${form.selectedImage === img.id ? 'bg-blue-600 text-white shadow-md' : 'bg-transparent grayscale hover:grayscale-0'}`}>{img.icon}</button>
+                       ))}
+                     </div>
+                   </div>
+
+                   <button disabled={loading || passwordScore < 4 || form.password.length < 12 || form.password !== confirmPassword || !form.selectedImage} className="w-full bg-slate-900 text-white p-3 rounded font-bold disabled:bg-slate-300">
+                     Next
+                   </button>
                 </form>
               )}
               {regStep === 2 && (
