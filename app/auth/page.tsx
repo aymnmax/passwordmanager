@@ -154,10 +154,8 @@ export default function AuthPage() {
       });
 
       if (dbError) throw new Error("Failed to save encryption keys.");
-
       setEmergencyKey(eKey);
       setRegStep(3); 
-
     } catch (err: any) { toast.error(err.message); } 
     finally { setLoading(false); }
   };
@@ -181,7 +179,7 @@ export default function AuthPage() {
       if (statusData && statusData.length > 0) {
         const { status, lock_time } = statusData[0];
         if (status === 'perm_locked') throw new Error("Account permanently locked.");
-        if (status === 'temp_locked') throw new Error(`Too many attempts. Try later.`);
+        if (status === 'temp_locked') throw new Error(`Too many attempts. Try again later.`);
       }
 
       const { error } = await supabase.auth.signInWithPassword({ email: form.email, password: form.password });
@@ -252,7 +250,11 @@ export default function AuthPage() {
 
   const completeLogin = async (user: any, deviceName: string) => {
     try {
-      const { data: profile, error } = await supabase.from('user_profiles').select('encrypted_mek, mek_iv').eq('id', user.id).single();
+      const { data: profile, error } = await supabase
+        .from('user_profiles')
+        .select('encrypted_mek, mek_iv')
+        .eq('id', user.id)
+        .single();
       
       if (error || !profile) {
         throw new Error("Vault profile not found.");
@@ -298,15 +300,20 @@ export default function AuthPage() {
               {loginStep === 1 && (
                 <form onSubmit={handleLoginInit} className="space-y-4">
                    <h2 className="text-2xl font-bold">Sign In</h2>
-                   <div className="relative"><Mail className="absolute left-3 top-3 text-gray-400 w-5 h-5"/><input type="email" required placeholder="Email" className="w-full pl-10 p-3 rounded border" value={form.email} onChange={e=>setForm({...form, email: e.target.value})} /></div>
+                   <div className="relative">
+                     <Mail className="absolute left-3 top-3 text-gray-400 w-5 h-5"/>
+                     <input type="email" required placeholder="Email" className="w-full pl-10 p-3 rounded border" value={form.email} onChange={e=>setForm({...form, email: e.target.value})} />
+                   </div>
                    <div className="relative">
                      <Lock className="absolute left-3 top-3 text-gray-400 w-5 h-5"/>
                      <input type={showPassword ? "text" : "password"} required placeholder="Master Password" className="w-full pl-10 pr-10 p-3 rounded border" value={form.password} onChange={e=>setForm({...form, password: e.target.value})} />
-                     <button type="button" onClick={() => setShowPassword(!showPassword)} className="absolute right-3 top-3 text-gray-400">
+                     <button type="button" onClick={() => setShowPassword(!showPassword)} className="absolute right-3 top-3 text-gray-400 hover:text-slate-600">
                        {showPassword ? <EyeOff size={20}/> : <Eye size={20}/>}
                      </button>
                    </div>
                    <button disabled={loading} className="w-full bg-blue-600 text-white p-3 rounded font-bold hover:bg-blue-700">{loading ? <Loader2 className="animate-spin mx-auto" /> : 'Next'}</button>
+                   {/* RESTORED RECOVERY LINK */}
+                   <p className="text-center text-sm text-blue-600 cursor-pointer hover:underline" onClick={()=>router.push('/auth/forgot')}>Account Recovery</p>
                 </form>
               )}
               {loginStep === 2 && (
@@ -325,6 +332,7 @@ export default function AuthPage() {
                         <button key={img.id} type="button" onClick={()=>handleLoginImage(img.id)} disabled={loading} className="p-4 border rounded hover:bg-blue-50 text-3xl transition transform hover:scale-105">{img.icon}</button>
                       ))}
                     </div>
+                    <button type="button" onClick={()=>setLoginStep(1)} className="text-sm underline text-gray-500">Cancel</button>
                  </div>
               )}
             </>
