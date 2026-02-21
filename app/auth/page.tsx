@@ -269,6 +269,21 @@ export default function AuthPage() {
       // Successfully decrypted everything - wipe the failure slate clean!
       await supabase.rpc('unlock_account_by_email', { email_input: form.email });
 
+      // ---- ADDED: FIRE THE ALERT EMAIL FOR NEW DEVICES ----
+      if (isNewDeviceFlow) {
+        fetch('/api/send-alert', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: form.email,
+            deviceName: deviceName,
+            userId: user.id,
+            time: new Date().toLocaleString()
+          })
+        }).catch(err => console.error("Failed to send alert email", err)); // Fail silently so user isn't blocked
+      }
+      // -----------------------------------------------------
+
       router.push('/vault');
     } catch (e) {
       console.error(e);
@@ -375,7 +390,7 @@ export default function AuthPage() {
                    <h2 className="text-xl font-bold">Setup Authenticator</h2>
                    <p className="text-sm text-gray-600">Scan with Google Authenticator.</p>
                    <input className="w-full text-center text-3xl tracking-widest p-3 border rounded font-mono mt-4" placeholder="000 000" maxLength={6} value={authCode} onChange={e=>setAuthCode(e.target.value)} required />
-                   <button disabled={loading} className="w-full bg-green-600 text-white p-3 rounded font-bold hover:bg-green-700 mt-2">{loading ? <Loader2 className="animate-spin mx-auto" /> : 'Generate Encryption Keys'}</button>
+                   <button disabled={loading} className="w-full bg-green-600 text-white p-3 rounded font-bold hover:bg-green-700 mt-2">{loading ? <Loader'2 className="animate-spin mx-auto" /> : 'Generate Encryption Keys'}</button>
                 </form>
               )}
               {regStep === 3 && (
