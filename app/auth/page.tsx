@@ -58,7 +58,6 @@ export default function AuthPage() {
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
       const hasEmailToken = window.location.hash.includes('access_token');
-
       if (event === 'SIGNED_IN' && hasEmailToken) {
         toast.success("Email verified! Please sign in with your Master Password.");
         setIsLogin(true);
@@ -66,12 +65,10 @@ export default function AuthPage() {
         setRegStep(1);
         window.history.replaceState(null, '', window.location.pathname);
       }
-      
       if (event === 'USER_UPDATED') {
         toast.info("Account updated.");
       }
     });
-
     return () => subscription.unsubscribe();
   }, []);
 
@@ -94,7 +91,13 @@ export default function AuthPage() {
     } else {
       const result = zxcvbn(val);
       setPasswordScore(result.score);
-      setPasswordFeedback(result.feedback.warning || result.feedback.suggestions[0] || "Keep typing...");
+      
+      // SOC ANALYST LOGIC: If score is 4 and length is 12+, show success.
+      if (result.score === 4 && val.length >= 12) {
+        setPasswordFeedback("Strong Password!");
+      } else {
+        setPasswordFeedback(result.feedback.warning || result.feedback.suggestions[0] || "Keep typing...");
+      }
     }
   };
 
@@ -149,10 +152,8 @@ export default function AuthPage() {
       });
 
       if (dbError) throw new Error("Failed to save encryption keys.");
-
       setEmergencyKey(eKey);
       setRegStep(3); 
-
     } catch (err: any) { toast.error(err.message); } 
     finally { setLoading(false); }
   };
@@ -175,16 +176,13 @@ export default function AuthPage() {
       const { data: statusData } = await supabase.rpc('check_account_status', { email_input: form.email });
       if (statusData && statusData.length > 0) {
         const { status, lock_time } = statusData[0];
-        if (status === 'perm_locked') throw new Error("Account permanently locked. Use Recovery.");
-        if (status === 'temp_locked') {
-          const unlockTime = new Date(lock_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-          throw new Error(`Too many attempts. Try again at ${unlockTime}.`);
-        }
+        if (status === 'perm_locked') throw new Error("Account permanently locked.");
+        if (status === 'temp_locked') throw new Error(`Try again later.`);
       }
       const { error } = await supabase.auth.signInWithPassword({ email: form.email, password: form.password });
       if (error) { 
         await supabase.rpc('handle_failed_attempt', { email_input: form.email });
-        throw new Error("Invalid email or Master Password.");
+        throw new Error("Invalid credentials.");
       }
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("Session Error");
@@ -206,11 +204,8 @@ export default function AuthPage() {
     try {
       const { data: { user } } = await supabase.auth.getUser();
       const { data: profile } = await supabase.from('user_profiles').select('totp_secret').eq('id', user?.id).single(); 
-      if (!profile?.totp_secret) throw new Error("Security setup missing.");
-      if (!authenticator.check(authCode, profile.totp_secret)) {
-        await supabase.rpc('handle_failed_attempt', { email_input: form.email });
-        throw new Error("Invalid Authenticator Code.");
-      }
+      if (!profile?.totp_secret) throw new Error("Setup missing.");
+      if (!authenticator.check(authCode, profile.totp_secret)) throw new Error("Invalid Code.");
       setLoginStep(3);
     } catch (err: any) { toast.error(err.message); } 
     finally { setLoading(false); }
@@ -221,12 +216,7 @@ export default function AuthPage() {
     try {
       const { data: { user } } = await supabase.auth.getUser();
       const { data: profile } = await supabase.from('user_profiles').select('selected_animal').eq('id', user?.id).single();
-      if (!profile || profile.selected_animal !== imageId) {
-        await supabase.rpc('handle_failed_attempt', { email_input: form.email });
-        await supabase.auth.signOut();
-        setLoginStep(1);
-        throw new Error("Wrong Security Image! Login aborted.");
-      }
+      if (!profile || profile.selected_animal !== imageId) throw new Error("Wrong Image!");
       const deviceToken = sessionStorage.getItem('temp_device_token')!;
       const deviceName = sessionStorage.getItem('temp_device_name')!;
       if (isNewDeviceFlow) {
@@ -240,7 +230,6 @@ export default function AuthPage() {
   const completeLogin = async (user: any, deviceName: string) => {
     try {
       const { data: profile } = await supabase.from('user_profiles').select('encrypted_mek, mek_iv').eq('id', user.id).single();
-      if (!profile?.encrypted_mek) throw new Error("Vault architecture missing.");
       const masterWrappingKey = await deriveKey(form.password, user.id);
       const mek = await unwrapMEK(profile.encrypted_mek, profile.mek_iv, masterWrappingKey);
       const exported = await window.crypto.subtle.exportKey('jwk', mek);
@@ -249,12 +238,7 @@ export default function AuthPage() {
       await supabase.from('login_sessions').insert({ user_id: user.id, device_name: deviceName });
       await supabase.rpc('unlock_account_by_email', { email_input: form.email });
       router.push('/vault');
-    } catch (e) {
-      await supabase.rpc('handle_failed_attempt', { email_input: form.email });
-      await supabase.auth.signOut();
-      setLoginStep(1);
-      toast.error("Decryption failed. Invalid Master Password.");
-    }
+    } catch (e) { toast.error("Decryption failed."); }
   };
 
   return (
@@ -291,14 +275,12 @@ export default function AuthPage() {
                      </button>
                    </div>
                    <button disabled={loading} className="w-full bg-blue-600 text-white p-3 rounded font-bold hover:bg-blue-700">{loading ? <Loader2 className="animate-spin mx-auto" /> : 'Next'}</button>
-                   <p className="text-center text-sm text-blue-600 cursor-pointer hover:underline" onClick={()=>router.push('/auth/forgot')}>Account Recovery</p>
                 </form>
               )}
               {loginStep === 2 && (
                 <form onSubmit={handleAuthVerify} className="space-y-4 text-center">
                    <div className="mx-auto w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center mb-2"><Smartphone className="text-blue-600" size={24} /></div>
                    <h2 className="text-xl font-bold">Identity Verification</h2>
-                   <p className="text-sm text-gray-500">Enter code from Authenticator.</p>
                    <input className="w-full text-center text-3xl tracking-widest p-3 border rounded font-mono" placeholder="000 000" maxLength={6} value={authCode} onChange={e=>setAuthCode(e.target.value)} />
                    <button disabled={loading} className="w-full bg-blue-600 text-white p-3 rounded font-bold">Verify</button>
                 </form>
@@ -311,7 +293,6 @@ export default function AuthPage() {
                         <button key={img.id} type="button" onClick={()=>handleLoginImage(img.id)} disabled={loading} className="p-4 border rounded hover:bg-blue-50 text-3xl transition transform hover:scale-105">{img.icon}</button>
                       ))}
                     </div>
-                    <button type="button" onClick={()=>setLoginStep(1)} className="text-sm underline text-gray-500">Cancel</button>
                  </div>
               )}
             </>
