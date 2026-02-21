@@ -6,7 +6,7 @@ import { supabase } from '@/lib/supabase';
 interface AuthContextType {
   user: any;
   masterKey: CryptoKey | null;
-  setMasterKey: (key: CryptoKey) => void;
+  setMasterKey: (key: CryptoKey | null) => void;
   logout: () => void;
 }
 
@@ -62,7 +62,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   // Helper: Save Key to Session Storage (Export as JWK)
-  const saveKey = async (key: CryptoKey) => {
+  const saveKey = async (key: CryptoKey | null) => {
+    if (!key) {
+      sessionStorage.removeItem('secure_vault_key');
+      setMasterKey(null);
+      return;
+    }
     const exported = await window.crypto.subtle.exportKey('jwk', key);
     sessionStorage.setItem('secure_vault_key', JSON.stringify(exported));
     setMasterKey(key);
@@ -88,11 +93,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
+  // THE FIX: Secure Logout Function
   const logout = async () => {
-    sessionStorage.removeItem('secure_vault_key'); // Wipe from storage
-    setMasterKey(null); // Wipe from RAM
-    await supabase.auth.signOut();
-    router.push('/auth');
+    try {
+      // 1. Wipe encryption keys and temporary session data from RAM/Session Storage
+      sessionStorage.removeItem('secure_vault_key');
+      sessionStorage.removeItem('temp_device_token');
+      sessionStorage.removeItem('temp_device_name');
+      
+      setMasterKey(null);
+      setUser(null);
+
+      // CRUCIAL: Do NOT use localStorage.clear() here.
+      // We must keep localStorage.getItem('vault_device_token') safe so devices stay trusted!
+
+      // 2. Log out of Supabase
+      await supabase.auth.signOut();
+      
+      // 3. Redirect to login
+      router.push('/auth');
+    } catch (error) {
+      console.error("Logout failed", error);
+    }
   };
 
   return (
