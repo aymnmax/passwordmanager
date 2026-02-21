@@ -52,18 +52,20 @@ export default function AuthPage() {
   const { setMasterKey } = useAuth();
   const router = useRouter();
 
-  // --- ADDED: EMAIL VERIFICATION REDIRECT HANDLER ---
+  // --- HANDLES EMAIL VERIFICATION REDIRECT ONLY ---
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-      if (event === 'SIGNED_IN') {
-        // The email is verified!
+      // Check if URL hash contains the access token from the email link
+      const hasEmailToken = window.location.hash.includes('access_token');
+
+      if (event === 'SIGNED_IN' && hasEmailToken) {
         toast.success("Email verified! Please sign in with your Master Password.");
         
-        // Force the UI to the login state
         setIsLogin(true);
+        setLoginStep(1);
         setRegStep(1);
         
-        // Clean the URL hash so the token doesn't stay in the address bar
+        // Remove token from URL for security and to prevent repeat toasts
         window.history.replaceState(null, '', window.location.pathname);
       }
       
@@ -362,7 +364,7 @@ export default function AuthPage() {
                    <div className="mx-auto bg-white p-4 border rounded-lg inline-block">{qrImage && <img src={qrImage} alt="QR" className="w-48 h-48" />}</div>
                    <h2 className="text-xl font-bold">Authenticator Setup</h2>
                    <input className="w-full text-center text-3xl tracking-widest p-3 border rounded font-mono" placeholder="000 000" maxLength={6} value={authCode} onChange={e=>setAuthCode(e.target.value)} required />
-                   <button disabled={loading} className="w-full bg-green-600 text-white p-3 rounded font-bold">{loading ? <Loader2 className="animate-spin mx-auto" /> : 'Complete'}</button>
+                   <button disabled={loading} className="w-full bg-green-600 text-white p-3 rounded font-bold">Complete</button>
                 </form>
               )}
               {regStep === 3 && (
