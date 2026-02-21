@@ -151,7 +151,6 @@ export default function AuthPage() {
     setLoading(true);
     
     try {
-      // 1. Check Account Status Before Login
       const { data: statusData } = await supabase.rpc('check_account_status', { email_input: form.email });
       
       if (statusData && statusData.length > 0) {
@@ -165,10 +164,8 @@ export default function AuthPage() {
         }
       }
 
-      // 2. Attempt Login
       const { error } = await supabase.auth.signInWithPassword({ email: form.email, password: form.password });
       
-      // 3. Process Failed Login Strike
       if (error) { 
         const { data: lockResult } = await supabase.rpc('handle_failed_attempt', { email_input: form.email });
         if (lockResult && lockResult.length > 0) {
@@ -185,7 +182,6 @@ export default function AuthPage() {
         return; 
       }
 
-      // 4. Success - Proceed
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("Session Error");
 
@@ -217,7 +213,6 @@ export default function AuthPage() {
       if (!profile?.totp_secret) throw new Error("Security setup missing.");
 
       if (!authenticator.check(authCode, profile.totp_secret)) {
-        // Strike for wrong auth code!
         await supabase.rpc('handle_failed_attempt', { email_input: form.email });
         throw new Error("Invalid Authenticator Code.");
       }
@@ -234,7 +229,6 @@ export default function AuthPage() {
       const { data: profile } = await supabase.from('user_profiles').select('selected_animal').eq('id', user?.id).single();
       
       if (!profile || profile.selected_animal !== imageId) {
-        // Strike for wrong image!
         await supabase.rpc('handle_failed_attempt', { email_input: form.email });
         await supabase.auth.signOut();
         setLoginStep(1);
@@ -265,11 +259,8 @@ export default function AuthPage() {
       setMasterKey(mek);
       
       await supabase.from('login_sessions').insert({ user_id: user.id, device_name: deviceName });
-      
-      // Successfully decrypted everything - wipe the failure slate clean!
       await supabase.rpc('unlock_account_by_email', { email_input: form.email });
 
-      // ---- ADDED: FIRE THE ALERT EMAIL FOR NEW DEVICES ----
       if (isNewDeviceFlow) {
         fetch('/api/send-alert', {
           method: 'POST',
@@ -280,14 +271,12 @@ export default function AuthPage() {
             userId: user.id,
             time: new Date().toLocaleString()
           })
-        }).catch(err => console.error("Failed to send alert email", err)); // Fail silently so user isn't blocked
+        }).catch(err => console.error("Failed to send alert email", err));
       }
-      // -----------------------------------------------------
 
       router.push('/vault');
     } catch (e) {
       console.error(e);
-      // Strike for decryption failure
       await supabase.rpc('handle_failed_attempt', { email_input: form.email });
       await supabase.auth.signOut();
       setLoginStep(1);
@@ -357,7 +346,6 @@ export default function AuthPage() {
                    <div>
                      <input type="password" required placeholder="Master Password (Min. 12 chars)" className="w-full p-3 border rounded" value={form.password} onChange={handlePasswordChange} />
                      
-                     {/* Visual Strength Meter */}
                      {form.password.length > 0 && (
                         <div className="mt-2 space-y-1 animate-in fade-in">
                           <div className="flex gap-1 h-1.5 w-full">
@@ -372,13 +360,11 @@ export default function AuthPage() {
                      )}
                    </div>
 
-                   {/* Confirm Password */}
                    <input type="password" required placeholder="Confirm Master Password" className={`w-full p-3 border rounded ${confirmPassword && form.password !== confirmPassword ? 'border-red-400 bg-red-50' : ''}`} value={confirmPassword} onChange={e=>setConfirmPassword(e.target.value)} />
                    {confirmPassword && form.password !== confirmPassword && <p className="text-xs text-red-500 font-medium">Passwords do not match.</p>}
 
                    <div><label className="text-sm font-bold block mb-2 text-gray-600">Select Anti-Phishing Image</label><div className="flex justify-between">{SECURITY_IMAGES.map(img => (<button type="button" key={img.id} onClick={()=>setForm({...form, selectedImage: img.id})} className={`text-xl p-2 border rounded ${form.selectedImage === img.id ? 'bg-blue-600 text-white scale-110 shadow-lg' : 'bg-white hover:bg-gray-50'}`}>{img.icon}</button>))}</div></div>
                    
-                   {/* Submit Button (Disabled until all conditions met) */}
                    <button disabled={loading || passwordScore < 4 || form.password.length < 12 || form.password !== confirmPassword || !form.selectedImage} className="w-full bg-slate-900 text-white p-3 rounded font-bold disabled:bg-slate-300 transition-colors">
                      {loading ? <Loader2 className="animate-spin mx-auto" /> : 'Next Step'}
                    </button>
@@ -390,7 +376,7 @@ export default function AuthPage() {
                    <h2 className="text-xl font-bold">Setup Authenticator</h2>
                    <p className="text-sm text-gray-600">Scan with Google Authenticator.</p>
                    <input className="w-full text-center text-3xl tracking-widest p-3 border rounded font-mono mt-4" placeholder="000 000" maxLength={6} value={authCode} onChange={e=>setAuthCode(e.target.value)} required />
-                   <button disabled={loading} className="w-full bg-green-600 text-white p-3 rounded font-bold hover:bg-green-700 mt-2">{loading ? <Loader'2 className="animate-spin mx-auto" /> : 'Generate Encryption Keys'}</button>
+                   <button disabled={loading} className="w-full bg-green-600 text-white p-3 rounded font-bold hover:bg-green-700 mt-2">{loading ? <Loader2 className="animate-spin mx-auto" /> : 'Generate Encryption Keys'}</button>
                 </form>
               )}
               {regStep === 3 && (
@@ -398,7 +384,7 @@ export default function AuthPage() {
                    <div className="text-center">
                      <AlertTriangle className="w-12 h-12 text-red-500 mx-auto mb-2" />
                      <h2 className="text-2xl font-black text-red-600">Emergency Recovery Kit</h2>
-                     <p className="text-sm text-gray-600 mt-2">If you forget your Master Password, this is the <strong>ONLY</strong> way to recover your data. We cannot reset it for you.</p>
+                     <p className="text-sm text-gray-600 mt-2">If you forget your Master Password, this is the <strong>ONLY</strong> way to recover your data.</p>
                    </div>
                    
                    <div className="bg-slate-50 border-2 border-dashed border-slate-300 p-6 rounded-xl text-center relative group">
