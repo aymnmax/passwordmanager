@@ -12,7 +12,7 @@ import QRCode from 'qrcode';
 import zxcvbn from 'zxcvbn';
 import { 
   Loader2, Mail, Lock, ShieldCheck, Smartphone, 
-  X, CheckCircle2, Server, Key, EyeOff, Code, AlertTriangle, FileText, Copy, ShieldAlert
+  CheckCircle2, Key, AlertTriangle, Copy
 } from 'lucide-react';
 
 const SECURITY_IMAGES = [
@@ -27,7 +27,6 @@ const SECURITY_IMAGES = [
 export default function AuthPage() {
   const [isLogin, setIsLogin] = useState(true);
   const [loading, setLoading] = useState(false);
-  const [showSecurityInfo, setShowSecurityInfo] = useState(false);
 
   // LOGIN STATE
   const [loginStep, setLoginStep] = useState(1);
@@ -52,17 +51,6 @@ export default function AuthPage() {
 
   const { setMasterKey } = useAuth();
   const router = useRouter();
-
-  const handleLockout = async (errorMsg: string) => {
-    await supabase.rpc('increment_failed_attempts', { email_input: form.email });
-    const { data: isLocked } = await supabase.rpc('check_is_locked', { email_input: form.email });
-    if (isLocked) {
-      toast.error("ACCOUNT LOCKED due to too many failed attempts.", { duration: 6000 });
-      throw new Error("Account Locked. You must reset your password to regain access.");
-    } else {
-      throw new Error(errorMsg);
-    }
-  };
 
   const getDeviceIdentifier = () => {
     let deviceId = localStorage.getItem('vault_device_token');
@@ -113,7 +101,6 @@ export default function AuthPage() {
       const isValid = authenticator.check(authCode, generatedSecret);
       if (!isValid) throw new Error("Invalid Code. Please scan the QR again.");
 
-      // 1. Create the Auth User
       const { data: authData, error: authError } = await supabase.auth.signUp({ 
         email: form.email, password: form.password,
         options: { data: { selected_animal: form.selectedImage, totp_secret: generatedSecret } }
@@ -122,18 +109,15 @@ export default function AuthPage() {
 
       const userId = authData.user.id;
 
-      // 2. ZERO-KNOWLEDGE CRYPTO ENGINE
       const eKey = generateEmergencyKey();
       const mek = await generateMEK(); 
       
       const masterWrappingKey = await deriveKey(form.password, userId); 
       const emergencyWrappingKey = await deriveKey(eKey, userId);       
 
-      // 3. Create the "Locked Boxes"
       const { encryptedKey: encMekMaster, iv: ivMaster } = await wrapMEK(mek, masterWrappingKey);
       const { encryptedKey: encMekRecovery, iv: ivRecovery } = await wrapMEK(mek, emergencyWrappingKey);
 
-      // 4. Save Locked Boxes using Secure RPC
       const { error: dbError } = await supabase.rpc('save_initial_keys', {
         target_user_id: userId,
         new_enc_mek: encMekMaster,
@@ -142,10 +126,7 @@ export default function AuthPage() {
         new_rec_mek_iv: ivRecovery
       });
 
-      if (dbError) {
-        console.error("RPC Error:", dbError);
-        throw new Error("Failed to save encryption keys.");
-      }
+      if (dbError) throw new Error("Failed to save encryption keys.");
 
       setEmergencyKey(eKey);
       setRegStep(3); 
@@ -168,13 +149,43 @@ export default function AuthPage() {
   const handleLoginInit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
+    
     try {
-      const { data: isLocked } = await supabase.rpc('check_is_locked', { email_input: form.email });
-      if (isLocked) throw new Error("Account Locked. Please use 'Forgot Password'.");
+      // 1. Check Account Status Before Login
+      const { data: statusData } = await supabase.rpc('check_account_status', { email_input: form.email });
+      
+      if (statusData && statusData.length > 0) {
+        const { status, lock_time } = statusData[0];
+        if (status === 'perm_locked') {
+          throw new Error("Account permanently locked. Please click 'Account Recovery' below.");
+        }
+        if (status === 'temp_locked') {
+          const unlockTime = new Date(lock_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          throw new Error(`Too many failed attempts. Try again at ${unlockTime}.`);
+        }
+      }
 
+      // 2. Attempt Login
       const { error } = await supabase.auth.signInWithPassword({ email: form.email, password: form.password });
-      if (error) { await handleLockout("Invalid email or password."); return; }
+      
+      // 3. Process Failed Login Strike
+      if (error) { 
+        const { data: lockResult } = await supabase.rpc('handle_failed_attempt', { email_input: form.email });
+        if (lockResult && lockResult.length > 0) {
+           const { status } = lockResult[0];
+           if (status === 'perm_locked') {
+              toast.error("ACCOUNT LOCKED. 5 consecutive failures. You must recover your vault using your Emergency Kit.", { duration: 8000 });
+           } else if (status === 'temp_locked') {
+              toast.error("3 failed attempts! Account locked for 5 minutes.", { duration: 6000 });
+           } else {
+              toast.error("Invalid email or Master Password.");
+           }
+        }
+        setLoading(false);
+        return; 
+      }
 
+      // 4. Success - Proceed
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("Session Error");
 
@@ -189,8 +200,12 @@ export default function AuthPage() {
 
       if (trusted) { setIsNewDeviceFlow(false); setLoginStep(3); } 
       else { setIsNewDeviceFlow(true); setLoginStep(2); }
-    } catch (err: any) { toast.error(err.message); } 
-    finally { setLoading(false); }
+      
+    } catch (err: any) { 
+      toast.error(err.message); 
+    } finally { 
+      setLoading(false); 
+    }
   };
 
   const handleAuthVerify = async (e: React.FormEvent) => {
@@ -202,8 +217,9 @@ export default function AuthPage() {
       if (!profile?.totp_secret) throw new Error("Security setup missing.");
 
       if (!authenticator.check(authCode, profile.totp_secret)) {
-        await handleLockout("Invalid Authenticator Code.");
-        return;
+        // Strike for wrong auth code!
+        await supabase.rpc('handle_failed_attempt', { email_input: form.email });
+        throw new Error("Invalid Authenticator Code.");
       }
       toast.success("Identity Verified.");
       setLoginStep(3);
@@ -218,10 +234,11 @@ export default function AuthPage() {
       const { data: profile } = await supabase.from('user_profiles').select('selected_animal').eq('id', user?.id).single();
       
       if (!profile || profile.selected_animal !== imageId) {
+        // Strike for wrong image!
+        await supabase.rpc('handle_failed_attempt', { email_input: form.email });
         await supabase.auth.signOut();
         setLoginStep(1);
-        await handleLockout("Wrong Security Image! Login aborted.");
-        return;
+        throw new Error("Wrong Security Image! Login aborted.");
       }
 
       const deviceToken = sessionStorage.getItem('temp_device_token')!;
@@ -248,14 +265,18 @@ export default function AuthPage() {
       setMasterKey(mek);
       
       await supabase.from('login_sessions').insert({ user_id: user.id, device_name: deviceName });
+      
+      // Successfully decrypted everything - wipe the failure slate clean!
       await supabase.rpc('unlock_account_by_email', { email_input: form.email });
 
       router.push('/vault');
     } catch (e) {
       console.error(e);
-      toast.error("Decryption failed. Invalid Master Password.");
+      // Strike for decryption failure
+      await supabase.rpc('handle_failed_attempt', { email_input: form.email });
       await supabase.auth.signOut();
       setLoginStep(1);
+      toast.error("Decryption failed. Invalid Master Password.");
     }
   };
 
