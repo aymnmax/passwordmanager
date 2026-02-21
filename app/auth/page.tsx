@@ -9,9 +9,10 @@ import { toast } from 'sonner';
 import { UAParser } from 'ua-parser-js';
 import { authenticator } from 'otplib';
 import QRCode from 'qrcode';
+import zxcvbn from 'zxcvbn';
 import { 
   Loader2, Mail, Lock, ShieldCheck, Smartphone, 
-  X, CheckCircle2, Server, Key, EyeOff, Code, AlertTriangle, FileText, Copy
+  X, CheckCircle2, Server, Key, EyeOff, Code, AlertTriangle, FileText, Copy, ShieldAlert
 } from 'lucide-react';
 
 const SECURITY_IMAGES = [
@@ -38,7 +39,12 @@ export default function AuthPage() {
   const [qrImage, setQrImage] = useState('');
   const [generatedSecret, setGeneratedSecret] = useState('');
   
-  // NEW: Emergency Kit State
+  // PASSWORD STRENGTH & CONFIRMATION STATE
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [passwordScore, setPasswordScore] = useState(0);
+  const [passwordFeedback, setPasswordFeedback] = useState('');
+  
+  // EMERGENCY KIT STATE
   const [emergencyKey, setEmergencyKey] = useState('');
   const [savedKit, setSavedKit] = useState(false);
 
@@ -67,10 +73,27 @@ export default function AuthPage() {
     return deviceId;
   };
 
+  const handlePasswordChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    setForm({ ...form, password: val });
+    
+    if (val.length === 0) {
+      setPasswordScore(0);
+      setPasswordFeedback('');
+    } else {
+      const result = zxcvbn(val);
+      setPasswordScore(result.score);
+      setPasswordFeedback(result.feedback.warning || "Keep typing...");
+    }
+  };
+
   // ================= REGISTER FLOW =================
   const handleRegInit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!form.selectedImage) return toast.error('Pick a security image first!');
+    if (form.password !== confirmPassword) return toast.error('Passwords do not match!');
+    if (form.password.length < 12 || passwordScore < 4) return toast.error('Password is not strong enough.');
+    
     setLoading(true);
     try {
       const secret = authenticator.generateSecret();
@@ -90,7 +113,7 @@ export default function AuthPage() {
       const isValid = authenticator.check(authCode, generatedSecret);
       if (!isValid) throw new Error("Invalid Code. Please scan the QR again.");
 
-      // 1. Create the Auth User (No security questions anymore!)
+      // 1. Create the Auth User
       const { data: authData, error: authError } = await supabase.auth.signUp({ 
         email: form.email, password: form.password,
         options: { data: { selected_animal: form.selectedImage, totp_secret: generatedSecret } }
@@ -101,16 +124,16 @@ export default function AuthPage() {
 
       // 2. ZERO-KNOWLEDGE CRYPTO ENGINE
       const eKey = generateEmergencyKey();
-      const mek = await generateMEK(); // The golden vault key
+      const mek = await generateMEK(); 
       
-      const masterWrappingKey = await deriveKey(form.password, userId); // Key A
-      const emergencyWrappingKey = await deriveKey(eKey, userId);       // Key B
+      const masterWrappingKey = await deriveKey(form.password, userId); 
+      const emergencyWrappingKey = await deriveKey(eKey, userId);       
 
       // 3. Create the "Locked Boxes"
       const { encryptedKey: encMekMaster, iv: ivMaster } = await wrapMEK(mek, masterWrappingKey);
       const { encryptedKey: encMekRecovery, iv: ivRecovery } = await wrapMEK(mek, emergencyWrappingKey);
 
-      // 4. Save Locked Boxes to Database using our Secure RPC Function
+      // 4. Save Locked Boxes using Secure RPC
       const { error: dbError } = await supabase.rpc('save_initial_keys', {
         target_user_id: userId,
         new_enc_mek: encMekMaster,
@@ -125,7 +148,7 @@ export default function AuthPage() {
       }
 
       setEmergencyKey(eKey);
-      setRegStep(3); // Move to Emergency Kit screen
+      setRegStep(3); 
 
     } catch (err: any) { toast.error(err.message); } 
     finally { setLoading(false); }
@@ -136,6 +159,7 @@ export default function AuthPage() {
     setIsLogin(true);
     setRegStep(1);
     setForm({ email: '', password: '', selectedImage: '' });
+    setConfirmPassword('');
     setEmergencyKey('');
     setSavedKit(false);
   };
@@ -213,17 +237,12 @@ export default function AuthPage() {
 
   const completeLogin = async (user: any, deviceName: string) => {
     try {
-      // 1. Fetch the Locked Box from Database
       const { data: profile } = await supabase.from('user_profiles').select('encrypted_mek, mek_iv').eq('id', user.id).single();
       if (!profile?.encrypted_mek) throw new Error("Vault architecture missing. Account may need resetting.");
 
-      // 2. Re-derive the Master Wrapping Key from Password
       const masterWrappingKey = await deriveKey(form.password, user.id);
-      
-      // 3. UNWRAP the Master Encryption Key!
       const mek = await unwrapMEK(profile.encrypted_mek, profile.mek_iv, masterWrappingKey);
       
-      // 4. Store securely in session
       const exported = await window.crypto.subtle.exportKey('jwk', mek);
       sessionStorage.setItem('secure_vault_key', JSON.stringify(exported));
       setMasterKey(mek);
@@ -295,11 +314,38 @@ export default function AuthPage() {
               {regStep === 1 && (
                 <form onSubmit={handleRegInit} className="space-y-4">
                    <h2 className="text-2xl font-bold">Create Vault</h2>
-                   <p className="text-sm text-gray-500 pb-2">Your Master Password is the ONLY key. Do not forget it.</p>
+                   <p className="text-sm text-gray-500 pb-2">Your Master Password is the ONLY key. We recommend a passphrase (e.g. "correct horse battery staple").</p>
+                   
                    <input type="email" required placeholder="Email Address" className="w-full p-3 border rounded" value={form.email} onChange={e=>setForm({...form, email: e.target.value})} />
-                   <input type="password" required placeholder="Master Password" className="w-full p-3 border rounded" value={form.password} onChange={e=>setForm({...form, password: e.target.value})} />
+                   
+                   <div>
+                     <input type="password" required placeholder="Master Password (Min. 12 chars)" className="w-full p-3 border rounded" value={form.password} onChange={handlePasswordChange} />
+                     
+                     {/* Visual Strength Meter */}
+                     {form.password.length > 0 && (
+                        <div className="mt-2 space-y-1 animate-in fade-in">
+                          <div className="flex gap-1 h-1.5 w-full">
+                            {[0, 1, 2, 3].map((index) => (
+                              <div key={index} className={`h-full flex-1 rounded-full transition-colors ${passwordScore > index ? (passwordScore === 4 ? 'bg-green-500' : passwordScore === 3 ? 'bg-blue-400' : passwordScore === 2 ? 'bg-yellow-400' : 'bg-red-500') : 'bg-gray-200'}`} />
+                            ))}
+                          </div>
+                          <p className={`text-xs font-medium ${passwordScore === 4 && form.password.length >= 12 ? 'text-green-600' : 'text-slate-500'}`}>
+                            {passwordScore === 4 && form.password.length >= 12 ? "Excellent! Your vault is highly secure." : passwordFeedback || "Password must be at least 12 characters and achieve maximum strength."}
+                          </p>
+                        </div>
+                     )}
+                   </div>
+
+                   {/* Confirm Password */}
+                   <input type="password" required placeholder="Confirm Master Password" className={`w-full p-3 border rounded ${confirmPassword && form.password !== confirmPassword ? 'border-red-400 bg-red-50' : ''}`} value={confirmPassword} onChange={e=>setConfirmPassword(e.target.value)} />
+                   {confirmPassword && form.password !== confirmPassword && <p className="text-xs text-red-500 font-medium">Passwords do not match.</p>}
+
                    <div><label className="text-sm font-bold block mb-2 text-gray-600">Select Anti-Phishing Image</label><div className="flex justify-between">{SECURITY_IMAGES.map(img => (<button type="button" key={img.id} onClick={()=>setForm({...form, selectedImage: img.id})} className={`text-xl p-2 border rounded ${form.selectedImage === img.id ? 'bg-blue-600 text-white scale-110 shadow-lg' : 'bg-white hover:bg-gray-50'}`}>{img.icon}</button>))}</div></div>
-                   <button disabled={loading} className="w-full bg-slate-900 text-white p-3 rounded font-bold hover:bg-slate-800">{loading ? <Loader2 className="animate-spin mx-auto" /> : 'Next Step'}</button>
+                   
+                   {/* Submit Button (Disabled until all conditions met) */}
+                   <button disabled={loading || passwordScore < 4 || form.password.length < 12 || form.password !== confirmPassword || !form.selectedImage} className="w-full bg-slate-900 text-white p-3 rounded font-bold disabled:bg-slate-300 transition-colors">
+                     {loading ? <Loader2 className="animate-spin mx-auto" /> : 'Next Step'}
+                   </button>
                 </form>
               )}
               {regStep === 2 && (
