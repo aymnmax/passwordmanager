@@ -7,7 +7,7 @@ import { Toaster } from "sonner"; // Assuming you are using Sonner for toasts ba
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "AymnSecureVault",
+  title: "Cybthreat",
   description: "Zero-Knowledge Enterprise Password Manager",
   manifest: "/manifest.json",
   appleWebApp: {
