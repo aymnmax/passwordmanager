@@ -1,6 +1,6 @@
 {
-  "name": "AymnSecureVault",
-  "short_name": "SecureVault",
+  "name": "Secnura Vault",
+  "short_name": "Secnura Vault",
   "description": "Zero-Knowledge Enterprise Password Manager",
   "start_url": "/",
   "display": "standalone",

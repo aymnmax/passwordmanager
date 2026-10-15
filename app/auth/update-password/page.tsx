@@ -78,7 +78,7 @@ export default function UpdatePasswordPage() {
       // Generate new Authenticator Secret for Step 2
       const secret = authenticator.generateSecret();
       setGeneratedSecret(secret);
-      const otpauth = authenticator.keyuri(user.email, 'AymnSecureVault', secret);
+      const otpauth = authenticator.keyuri(user.email, 'Secnura Vault', secret);
       const imageUrl = await QRCode.toDataURL(otpauth);
       setQrImage(imageUrl);
       setStep(2);

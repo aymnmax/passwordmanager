@@ -7,13 +7,13 @@ import { Toaster } from "sonner"; // Assuming you are using Sonner for toasts ba
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "Cybthreat",
-  description: "Zero-Knowledge Enterprise Password Manager",
+  title: "Secnura Vault",
+  description: "Client-side encrypted, zero-knowledge password vault",
   manifest: "/manifest.json",
   appleWebApp: {
     capable: true,
     statusBarStyle: "default",
-    title: "SecureVault",
+    title: "Secnura Vault",
   },
   formatDetection: {
     telephone: false,
@@ -24,8 +24,7 @@ export const viewport: Viewport = {
   themeColor: "#0f172a", // Matches your bg-slate-900 branding
   width: "device-width",
   initialScale: 1,
-  maximumScale: 1, // Prevents annoying auto-zoom on iOS when typing passwords
-  userScalable: false,
+  maximumScale: 5,
 };
 
 export default function RootLayout({

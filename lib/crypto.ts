@@ -13,12 +13,12 @@ export async function deriveKey(password: string, salt: string): Promise<CryptoK
     {
       name: "PBKDF2",
       salt: enc.encode(salt),
-      iterations: 100000,
+      iterations: 600000,
       hash: "SHA-256",
     },
     keyMaterial,
     { name: "AES-GCM", length: 256 },
-    true, // Must be true
+    true, // Extractable only because the current key-wrapping flow requires it
     ["encrypt", "decrypt", "wrapKey", "unwrapKey"] // Added wrap/unwrap permissions
   );
 }
@@ -97,7 +97,7 @@ export function generatePassword(length = 16): string {
   const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()_+";
   let retVal = "";
   for (let i = 0, n = charset.length; i < length; ++i) {
-    retVal += charset.charAt(Math.floor(Math.random() * n));
+    retVal += charset.charAt(window.crypto.getRandomValues(new Uint32Array(1))[0] % n);
   }
   return retVal;
 }

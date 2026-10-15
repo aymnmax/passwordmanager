@@ -35,6 +35,8 @@ export default function VaultDashboard() {
   // New State for Password Health
   const [pwnedWarning, setPwnedWarning] = useState<string | null>(null);
   const [isCheckingPwned, setIsCheckingPwned] = useState(false);
+  const [breachCounts, setBreachCounts] = useState<Record<string, number>>({});
+  const [breachAuditLoading, setBreachAuditLoading] = useState(false);
 
   // Form State
   const [form, setForm] = useState({ name: '', url: '', username: '', password: '', description: '' });
@@ -108,6 +110,35 @@ export default function VaultDashboard() {
     if (masterKey) loadItems();
   }, [masterKey]);
 
+  // Audit saved passwords with HIBP's k-anonymity range API. Full hashes/passwords never leave this browser.
+  useEffect(() => {
+    if (!items.length) { setBreachCounts({}); return; }
+    let cancelled = false;
+    const audit = async () => {
+      setBreachAuditLoading(true);
+      const result: Record<string, number> = {};
+      for (const item of items.filter((entry: any) => entry.type === 'password' && entry.secret && entry.secret !== 'Error Decrypting')) {
+        try {
+          const hash = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(item.secret));
+          const hex = Array.from(new Uint8Array(hash)).map((b: number) => b.toString(16).padStart(2, '0')).join('').toUpperCase();
+          const response = await fetch(`https://api.pwnedpasswords.com/range/${hex.slice(0, 5)}`, { headers: { 'Add-Padding': 'true' }, cache: 'no-store' });
+          if (!response.ok) continue;
+          const match = (await response.text()).split('\n').map(line => line.trim()).find(line => line.split(':')[0] === hex.slice(5));
+          if (match) result[item.id] = Number(match.split(':')[1]) || 0;
+        } catch { /* Keep the score conservative when the service cannot be reached. */ }
+      }
+      if (!cancelled) { setBreachCounts(result); setBreachAuditLoading(false); }
+    };
+    audit();
+    return () => { cancelled = true; };
+  }, [items]);
+
+  const passwordItems = items.filter((item: any) => item.type === 'password');
+  const expiredItems = passwordItems.filter((item: any) => Date.now() - new Date(item.updated_at || item.created_at || Date.now()).getTime() >= 30 * 86400000);
+  const weakItems = passwordItems.filter((item: any) => typeof item.secret === 'string' && item.secret.length < 12);
+  const breachedItems = passwordItems.filter((item: any) => (breachCounts[item.id] || 0) > 0);
+  const securityScore = Math.max(0, 100 - breachedItems.length * 35 - expiredItems.length * 15 - weakItems.length * 10);
+
   // --- 3. PASSWORD BREACH CHECK (HIBP API) ---
   const checkPasswordBreach = useCallback(async (password: string) => {
     if (!password || password.length < 4) {
@@ -128,12 +159,13 @@ export default function VaultDashboard() {
       const prefix = hashHex.substring(0, 5);
       const suffix = hashHex.substring(5);
 
-      const response = await fetch(`https://api.pwnedpasswords.com/range/${prefix}`);
+      const response = await fetch(`https://api.pwnedpasswords.com/range/${prefix}`, { headers: { "Add-Padding": "true" }, cache: "no-store" });
+      if (!response.ok) throw new Error("Breach check service unavailable");
       const text = await response.text();
 
       // 3. Check if suffix exists in response
       const lines = text.split('\n');
-      const match = lines.find(line => line.startsWith(suffix));
+      const match = lines.map(line => line.trim()).find(line => line.split(':')[0] === suffix);
 
       if (match) {
         const count = match.split(':')[1];
@@ -162,7 +194,8 @@ export default function VaultDashboard() {
 
   const loadItems = async () => {
     if (!masterKey) return;
-    const { data } = await supabase.from('vault_items').select('*').order('created_at', { ascending: false });
+    const { data, error } = await supabase.from('vault_items').select('*').eq('user_id', user?.id).order('created_at', { ascending: false });
+    if (error) { toast.error("Could not load vault items."); return; }
     if (data) {
         const decrypted = await Promise.all(data.map(async (item) => {
             try {
@@ -177,7 +210,7 @@ export default function VaultDashboard() {
   const handleDelete = async (id: string) => {
     if (!window.confirm("Are you sure you want to delete this item? This cannot be undone.")) return;
 
-    const { error } = await supabase.from('vault_items').delete().eq('id', id);
+    const { error } = await supabase.from('vault_items').delete().eq('id', id).eq('user_id', user?.id);
     if (error) {
       toast.error("Failed to delete item.");
     } else {
@@ -195,7 +228,7 @@ export default function VaultDashboard() {
     try {
       if (editingId) {
           // UPDATE
-          await supabase.from('vault_items').update({
+          const { error } = await supabase.from('vault_items').update({
               name: form.name,
               username: form.username,
               url: form.url,
@@ -203,11 +236,12 @@ export default function VaultDashboard() {
               encrypted_blob: ciphertext,
               iv: iv,
               updated_at: new Date().toISOString()
-          }).eq('id', editingId);
+          }).eq('id', editingId).eq('user_id', user?.id);
+          if (error) { toast.error("Could not update item. Check your database policies."); return; }
           toast.success("Item updated successfully.");
       } else {
           // INSERT
-          await supabase.from('vault_items').insert({
+          const { error } = await supabase.from('vault_items').insert({
               user_id: user.id,
               type: addType,
               name: form.name,
@@ -217,6 +251,7 @@ export default function VaultDashboard() {
               encrypted_blob: ciphertext,
               iv: iv
           });
+          if (error) { toast.error("Could not save item. Check your database policies."); return; }
           toast.success("New item added to vault.");
       }
       closeForm();
@@ -277,16 +312,16 @@ export default function VaultDashboard() {
       
       {/* HEADER */}
       <header className="bg-white border-b border-gray-200 sticky top-0 z-20">
-        <div className="max-w-5xl mx-auto px-6 h-16 flex items-center justify-between">
+        <div className="max-w-5xl mx-auto px-4 sm:px-6 min-h-16 py-3 flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-2">
-              <div className="bg-gray-900 text-white p-1.5 rounded-md">
-                <Shield size={18} />
+              <div className="h-9 w-9 rounded-lg bg-slate-950 p-1 overflow-hidden flex items-center justify-center">
+                <img src="/secnura-shield.png" alt="Secnura Vault shield" className="h-full w-full object-contain" />
               </div>
-              <span className="font-semibold text-lg tracking-tight">AymnSecureVault</span>
+              <span className="font-semibold text-lg tracking-tight">Secnura Vault</span>
             </div>
 
             <div className="flex items-center gap-4">
-               <div className="hidden md:flex items-center bg-gray-100 px-3 py-1.5 rounded-md border border-gray-200">
+               <div className="flex items-center bg-gray-100 px-3 py-1.5 rounded-md border border-gray-200 flex-1 min-w-0 sm:flex-none">
                   <Search size={14} className="text-gray-400 mr-2" />
                   <input 
                     placeholder="Search vault..." 
@@ -302,8 +337,27 @@ export default function VaultDashboard() {
         </div>
       </header>
 
-      <main className="max-w-5xl mx-auto px-6 pt-8">
+      <main className="max-w-5xl mx-auto px-4 sm:px-6 pt-6 sm:pt-8">
         
+        {/* SECURITY HEALTH */}
+        <section className="mb-7 rounded-2xl border border-slate-200 bg-white p-5 sm:p-6 shadow-sm">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="rounded-xl bg-cyan-50 p-3 text-cyan-700"><Shield size={23}/></div>
+              <div><h2 className="font-semibold text-slate-900">Vault security score</h2><p className="text-sm text-slate-500">Based on breach exposure, password age and length</p></div>
+            </div>
+            <div className="flex items-baseline gap-1"><span className={`text-4xl font-bold ${securityScore < 60 ? 'text-red-600' : securityScore < 85 ? 'text-amber-600' : 'text-emerald-600'}`}>{breachAuditLoading ? '—' : securityScore}</span><span className="text-slate-400">/100</span></div>
+          </div>
+          <div className="mt-4 h-2.5 overflow-hidden rounded-full bg-slate-100"><div className={`h-full rounded-full transition-all ${securityScore < 60 ? 'bg-red-500' : securityScore < 85 ? 'bg-amber-500' : 'bg-emerald-500'}`} style={{width: `${breachAuditLoading ? 0 : securityScore}%`}}/></div>
+          <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div className="rounded-xl bg-slate-50 p-3"><p className="text-xs text-slate-500">Breached passwords</p><p className="mt-1 font-semibold text-slate-900">{breachAuditLoading ? 'Checking…' : breachedItems.length}</p></div>
+            <div className="rounded-xl bg-slate-50 p-3"><p className="text-xs text-slate-500">Password reset required (30+ days)</p><p className="mt-1 font-semibold text-slate-900">{expiredItems.length}</p></div>
+            <div className="rounded-xl bg-slate-50 p-3"><p className="text-xs text-slate-500">Weak passwords (under 12 chars)</p><p className="mt-1 font-semibold text-slate-900">{weakItems.length}</p></div>
+          </div>
+          {(breachedItems.length > 0 || expiredItems.length > 0) && <p className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">Action required: replace breached passwords immediately and update passwords that are 30 days old. Password age currently uses the item's last-updated timestamp.</p>}
+          <details className="mt-4 text-sm text-slate-600"><summary className="cursor-pointer font-medium text-slate-700">How Secnura Vault protects your data</summary><p className="mt-2 leading-6">Vault secrets are encrypted in your browser before being stored. Secnura's operators should not be able to read vault contents when encryption keys remain only with you. HIBP checks use k-anonymity: only the first five characters of a SHA-1 password hash are sent to the service, never the password or full hash. This is a design goal, not a substitute for an independent security audit; account metadata and service usage may still be visible to infrastructure providers.</p></details>
+        </section>
+
         {/* ACTION BAR */}
         {!isAdding && (
           <div className="flex gap-3 mb-10">
@@ -407,7 +461,7 @@ export default function VaultDashboard() {
             </h3>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {passwords.map((item) => (
-                  <VaultCard key={item.id} item={item} onEdit={() => startEdit(item)} onDelete={() => handleDelete(item.id)} />
+                  <VaultCard key={item.id} item={item} onEdit={() => startEdit(item)} onDelete={() => handleDelete(item.id)} breached={(breachCounts[item.id] || 0) > 0} expired={Date.now() - new Date(item.updated_at || item.created_at || Date.now()).getTime() >= 30 * 86400000} />
               ))}
             </div>
           </div>
@@ -443,7 +497,7 @@ export default function VaultDashboard() {
 }
 
 // --- SUB-COMPONENT: CARD ---
-function VaultCard({ item, onEdit, onDelete, isApi = false }: { item: any, onEdit: () => void, onDelete: () => void, isApi?: boolean }) {
+function VaultCard({ item, onEdit, onDelete, isApi = false, breached = false, expired = false }: { item: any, onEdit: () => void, onDelete: () => void, isApi?: boolean, breached?: boolean, expired?: boolean }) {
     const copyToClipboard = (text: string) => {
         navigator.clipboard.writeText(text);
         toast.success("Copied to clipboard");
@@ -478,6 +532,7 @@ function VaultCard({ item, onEdit, onDelete, isApi = false }: { item: any, onEdi
                 </div>
             </div>
 
+            {!isApi && (breached || expired) && <p className="mb-2 rounded-md bg-red-50 px-2 py-1.5 text-xs font-medium text-red-700">{breached ? 'Found in known breaches' : '30-day reset required'}</p>}
             <div className="mt-auto pt-3">
                 <div className="bg-gray-50 border border-gray-100 rounded flex items-center justify-between p-2 group-hover:border-gray-200 transition-colors">
                     <div className="flex gap-1">

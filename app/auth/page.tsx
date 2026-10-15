@@ -114,7 +114,7 @@ export default function AuthPage() {
     try {
       const secret = authenticator.generateSecret();
       setGeneratedSecret(secret);
-      const otpauth = authenticator.keyuri(form.email, 'AymnSecureVault', secret);
+      const otpauth = authenticator.keyuri(form.email, 'Secnura Vault', secret);
       const imageUrl = await QRCode.toDataURL(otpauth);
       setQrImage(imageUrl);
       setRegStep(2); 
@@ -283,7 +283,7 @@ export default function AuthPage() {
         {/* LEFT PANEL */}
         <div className="md:w-5/12 bg-slate-900 p-8 text-white flex flex-col justify-center relative overflow-hidden">
            <ShieldCheck className="w-12 h-12 text-blue-400 mb-6" />
-           <h1 className="text-3xl font-bold mb-4">AymnSecureVault</h1>
+           <h1 className="text-3xl font-bold mb-4">Secnura Vault</h1>
            <div className="space-y-4 text-slate-300 text-sm leading-relaxed z-10 relative">
              <p className="flex items-start gap-2"><CheckCircle2 size={16} className="text-blue-400 mt-1"/> Zero-Knowledge Architecture</p>
              <p className="flex items-start gap-2"><CheckCircle2 size={16} className="text-blue-400 mt-1"/> Cryptographic Key Wrapping</p>

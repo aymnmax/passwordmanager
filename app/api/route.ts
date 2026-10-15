@@ -10,13 +10,13 @@ export async function POST(request: Request) {
     const freezeLink = `${process.env.NEXT_PUBLIC_SITE_URL}/auth/freeze?user=${userId}`;
 
     const { data, error } = await resend.emails.send({
-      from: 'AymnSecureVault Security <security@your-resend-domain.com>', // Update with your verified Resend domain
+      from: 'Secnura Vault Security <security@your-resend-domain.com>', // Update with your verified Resend domain
       to: email,
       subject: 'Security Alert: New Login Detected',
       html: `
         <div style="font-family: sans-serif; max-w: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 8px; padding: 24px;">
           <h2 style="color: #0f172a; margin-top: 0;">New Device Login</h2>
-          <p style="color: #475569; font-size: 16px;">We noticed a successful login to your AymnSecureVault from a new device.</p>
+          <p style="color: #475569; font-size: 16px;">We noticed a successful login to your Secnura Vault from a new device.</p>
           
           <div style="background-color: #f8fafc; padding: 16px; border-radius: 6px; margin: 24px 0;">
             <p style="margin: 0 0 8px 0; color: #334155;"><strong>Device:</strong> ${deviceName}</p>
